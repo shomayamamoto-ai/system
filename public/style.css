@@ -59,6 +59,8 @@ p { margin: 0; }
 svg.ic { width: 22px; height: 22px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .num, .kpi b, .ev b, .slots button, .cal button { font-variant-numeric: tabular-nums; }
 
+/* dvh（アドレスバーを除いた画面の高さ）が使えない古いスマホ向けに、vh の指定を先に書いている */
+
 /* ---------- ボタン・入力 ---------- */
 button, .btn {
   font: inherit; cursor: pointer; border-radius: var(--radius-s); border: 1px solid var(--line-strong);
@@ -262,7 +264,7 @@ div.rowitem { cursor: default; }
 .pill.cancelled, .pill.plain { background: var(--surface-2); color: var(--muted); }
 .history { max-height: 240px; overflow-y: auto; border-top: 1px solid var(--line); }
 .history > div { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: .875rem; }
-.login-wrap { min-height: 100dvh; display: grid; place-items: center; background: var(--band); padding: 24px 16px; }
+.login-wrap { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; background: var(--band); padding: 24px 16px; }
 .login { width: min(400px, 100%); padding: 32px 28px; }
 .login h1 { text-align: center; font-size: 1.35rem; }
 .login h1::after { content: ""; display: block; width: 36px; height: 1px; background: var(--gold-line); margin: 14px auto 0; }
@@ -325,7 +327,7 @@ th, td { border-bottom: 1px solid var(--line); padding: 8px; text-align: left; }
 
 .toasts { position: fixed; right: 16px; left: 16px; bottom: calc(16px + var(--nav-h) + env(safe-area-inset-bottom)); display: grid; gap: 8px; justify-items: end; z-index: 30; pointer-events: none; }
 .toast { background: var(--band); color: var(--band-text); padding: 12px 16px; border-radius: var(--radius-s); border-left: 3px solid var(--gold-line); max-width: 420px; font-size: .88rem; box-shadow: 0 8px 24px rgba(0, 0, 0, .25); }
-dialog { border: none; border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 26px; width: min(520px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; box-shadow: 0 24px 60px rgba(10, 16, 29, .35); }
+dialog { border: none; border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 26px; width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); overflow-y: auto; box-shadow: 0 24px 60px rgba(10, 16, 29, .35); }
 dialog::backdrop { background: rgba(10, 16, 29, .55); }
 dialog h2 { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .sheet-menu { display: grid; gap: 8px; }
@@ -400,7 +402,7 @@ dialog h2 { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
   .login { padding: 28px 20px; }
 
   /* ダイアログは下からせり上がるシートにする */
-  dialog { width: 100%; max-width: 100%; margin: auto 0 0; border-radius: 16px 16px 0 0; padding: 22px 16px calc(22px + env(safe-area-inset-bottom)); max-height: 92dvh; }
+  dialog { width: 100%; max-width: 100%; margin: auto 0 0; border-radius: 16px 16px 0 0; padding: 22px 16px calc(22px + env(safe-area-inset-bottom)); max-height: 88vh; max-height: 92dvh; }
   dialog .row.end > * { flex: 1; }
 }
 .login button.primary { width: 100%; min-height: 50px; }
