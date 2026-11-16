@@ -130,7 +130,7 @@ const refresh = () => loaders[state.tab]();
 // ---------- カレンダー ----------
 async function loadCalendar() {
   const month = state.view === 'month';
-  $('week').hidden = $('strip').hidden = month;
+  $('week').hidden = $('strip').hidden = $('weekFoot').hidden = month;
   $('month').hidden = !month;
   $('viewWeek').classList.toggle('on', !month);
   $('viewMonth').classList.toggle('on', month);
@@ -145,44 +145,105 @@ async function loadWeek() {
   weekData = await call(`/api/admin/calendar?from=${from}&to=${to}`);
   drawWeek();
 }
+// 同じ時間に重なる予定を、横に並べるための列（レーン）を割り振る
+function layout(items) {
+  const toMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+  const list = items.map((x) => ({ x, s: toMin(x.start), e: Math.max(toMin(x.end), toMin(x.start) + 15) })).sort((p, q) => p.s - q.s || q.e - p.e);
+  let group = [];
+  let groupEnd = -1;
+  const close = () => { const n = Math.max(...group.map((g) => g.lane)) + 1; group.forEach((g) => { g.lanes = n; }); group = []; };
+  for (const it of list) {
+    if (group.length && it.s >= groupEnd) close();
+    const used = new Set(group.filter((g) => g.e > it.s).map((g) => g.lane));
+    it.lane = 0;
+    while (used.has(it.lane)) it.lane++;
+    group.push(it);
+    groupEnd = Math.max(groupEnd, it.e);
+  }
+  if (group.length) close();
+  return list;
+}
 function drawWeek() {
   const from = mondayOf(state.cursor);
-  const days = [];
-  const strip = [];
+  const toMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+  const showCancelled = $('showCancelled').checked;
+  const week = [];
   for (let i = 0; i < 7; i++) {
     const d = addDays(from, i);
-    const closed = weekData.closedDays.find((c) => c.date === d);
     const items = []
-      .concat(weekData.bookings.filter((b) => b.date === d).map((b) => ({ kind: 'booking', ...b })))
+      .concat(weekData.bookings.filter((b) => b.date === d && (showCancelled || b.status !== 'cancelled')).map((b) => ({ kind: 'booking', ...b })))
       .concat(weekData.blocks.filter((k) => k.date === d).map((k) => ({ kind: 'block', ...k })))
-      .filter(visible)
-      .sort((a, b) => a.start.localeCompare(b.start));
-    const active = items.filter((x) => x.kind === 'booking' && x.status !== 'cancelled').length;
+      .filter(visible);
+    week.push({ d, items, closed: weekData.closedDays.find((c) => c.date === d), active: items.filter((x) => x.kind === 'booking' && x.status !== 'cancelled').length });
+  }
+  // 表示する時間帯: 受付時間と、その週の予約・予定がすべて入る範囲
+  const staff = state.config.staff.filter((s) => !state.staffFilter || s.id === state.staffFilter);
+  const opens = staff.flatMap((s) => s.hours.filter(Boolean).map((h) => toMin(h.start)));
+  const closes = staff.flatMap((s) => s.hours.filter(Boolean).map((h) => toMin(h.end)));
+  const all = week.flatMap((w) => w.items);
+  const first = Math.floor(Math.min(9 * 60, ...opens, ...all.map((x) => toMin(x.start))) / 60);
+  const last = Math.ceil(Math.max(18 * 60, ...closes, ...all.map((x) => toMin(x.end))) / 60);
+  const hh = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--hh')) || 52;
+  const y = (min) => ((min - first * 60) / 60) * hh;
+  const height = (last - first) * hh;
+
+  const labels = el('div', { className: 'tlabels', style: `height:${height}px` });
+  for (let h = first; h < last; h++) labels.append(el('span', { style: `top:${y(h * 60)}px`, textContent: `${h}:00` }));
+  const head = [el('div')];
+  const cols = [labels];
+  const strip = [];
+  const jst = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date());
+  for (const w of week) {
+    const { d } = w;
     const isToday = d === state.config.today;
-    const box = el('div', { className: 'day' + (isToday ? ' today' : '') + (d === state.cursor ? ' sel' : '') },
-      el('h3', null, jp(d), isToday ? el('span', { className: 'tag', textContent: '今日' }) : null,
-        closed ? el('span', { className: 'tag closed', textContent: closed.title }) : null));
-    if (!items.length) box.append(el('p', { className: 'muted', textContent: closed ? '休業日です' : '予定はありません' }));
-    for (const x of items) {
-      const isBooking = x.kind === 'booking';
-      const btn = el('button', { className: 'item ' + (isBooking ? x.status : 'block') },
-        el('b', { textContent: `${x.start}〜${x.end}` }),
-        isBooking ? `${x.customerName} 様／${staffName(x.staffId)}` : `${x.recurring ? '毎週・' : ''}${x.title}／${staffName(x.staffId)}`);
-      btn.addEventListener('click', () => (isBooking ? openBooking(x) : openBlock(x)));
-      box.append(btn);
+    head.push(el('div', { className: isToday ? 'today' : '' }, `${WD[wd(d)]}`, el('span', { className: 'd', textContent: String(Number(d.slice(8))) }),
+      w.closed ? el('span', { className: 'tag', textContent: w.closed.title }) : null));
+    const col = el('div', { className: 'tcol' + (w.closed ? ' closed' : '') + (d === state.cursor ? ' sel' : ''), style: `height:${height}px` });
+    // 受付時間の外をうすく塗る（全員が休みの時間帯）
+    if (!w.closed) {
+      const hs = staff.map((s) => s.hours[wd(d)]).filter(Boolean);
+      const open = hs.length ? Math.min(...hs.map((h) => toMin(h.start))) : last * 60;
+      const shut = hs.length ? Math.max(...hs.map((h) => toMin(h.end))) : last * 60;
+      if (open > first * 60) col.append(el('div', { className: 'off', style: `top:0;height:${y(Math.min(open, last * 60))}px` }));
+      if (hs.length && shut < last * 60) col.append(el('div', { className: 'off', style: `top:${y(shut)}px;bottom:0` }));
     }
-    days.push(box);
+    for (const it of layout(w.items)) {
+      const x = it.x;
+      const isBooking = x.kind === 'booking';
+      const btn = el('button', { className: 'ev ' + (isBooking ? x.status : 'block') + (it.e - it.s <= 30 ? ' short' : ''),
+        style: `top:${y(it.s)}px;height:${Math.max(22, ((it.e - it.s) / 60) * hh - 1)}px;left:calc(${(it.lane / it.lanes) * 100}% + 2px);width:calc(${100 / it.lanes}% - 4px)` },
+        el('b', { textContent: `${x.start} ${isBooking ? x.customerName : (x.recurring ? '毎週・' : '') + x.title}` }),
+        el('span', { textContent: `${isBooking ? serviceName(x.serviceId) + '／' : ''}${staffName(x.staffId)}` }));
+      btn.title = `${x.start}〜${x.end} ${isBooking ? x.customerName + ' 様／' + STATUS[x.status] : x.title}／${staffName(x.staffId)}`;
+      btn.addEventListener('click', (ev) => { ev.stopPropagation(); (isBooking ? openBooking(x) : openBlock(x)); });
+      col.append(btn);
+    }
+    if (isToday) {
+      const now = toMin(jst);
+      if (now > first * 60 && now < last * 60) col.append(el('div', { className: 'nowline', style: `top:${y(now)}px` }));
+    }
+    // 空いている場所を押すと、その時刻（30分きざみ）で予約を追加する
+    if (!w.closed) {
+      col.addEventListener('click', (ev) => {
+        if (ev.target !== col) return;
+        const min = first * 60 + Math.floor(((ev.offsetY / hh) * 60) / 30) * 30;
+        openBookingForm(null, { date: d, start: `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}` });
+      });
+    }
+    cols.push(col);
     // スマホ用: 日付を選ぶボタン
     const sb = el('button', { className: isToday ? 'today' : '' }, el('small', { textContent: WD[wd(d)] }),
-      el('span', { textContent: String(Number(d.slice(8))) }), el('span', { className: 'cnt', textContent: closed ? '休' : active ? `${active}件` : '' }));
+      el('span', { className: 'd', textContent: String(Number(d.slice(8))) }), el('span', { className: 'cnt', textContent: w.closed ? '休' : w.active ? `${w.active}件` : '' }));
     sb.setAttribute('aria-pressed', String(d === state.cursor));
-    sb.setAttribute('aria-label', `${jp(d)} 予約${active}件`);
+    sb.setAttribute('aria-label', `${jp(d)} 予約${w.active}件`);
     sb.addEventListener('click', () => { state.cursor = d; drawWeek(); });
     strip.push(sb);
   }
-  $('week').replaceChildren(...days);
+  $('weekHead').replaceChildren(...head);
+  $('weekBody').replaceChildren(...cols);
   $('strip').replaceChildren(...strip);
 }
+$('showCancelled').addEventListener('change', () => { if (weekData) drawWeek(); });
 async function loadMonth() {
   const first = state.cursor.slice(0, 8) + '01';
   const last = addDays(shiftMonth(first, 1), -1);
@@ -265,7 +326,7 @@ function openBlock(k) {
 // ---------- 予約の追加・日時変更 ----------
 const options = (list) => list.map((s) => el('option', { value: s.id, textContent: s.name }));
 let editing = null;
-function openBookingForm(booking) {
+function openBookingForm(booking, preset) {
   const f = $('bookingForm');
   editing = booking || null;
   f.reset();
@@ -284,8 +345,8 @@ function openBookingForm(booking) {
     f.start.value = editing.start;
   } else {
     if (state.staffFilter) f.staffId.value = state.staffFilter;
-    f.date.value = state.cursor;
-    f.start.value = '10:00';
+    f.date.value = preset ? preset.date : state.cursor;
+    f.start.value = preset ? preset.start : '10:00';
   }
   $('bookingError').hidden = true;
   $('bookingDialog').showModal();
@@ -420,13 +481,15 @@ function bars(id, rows, valueText) {
     el('span', { className: 'val', textContent: valueText(r) }),
   ]));
 }
-// 前の期間との差を「+3件」「-2pt」のように表す
-function versus(cur, prev, kind, hasPrev) {
-  if (!hasPrev || prev == null || cur == null) return '前の期間: データなし';
-  const sign = (n) => (n > 0 ? '+' : n < 0 ? '−' : '±') + Math.abs(n);
-  if (kind === 'rate') return `前の期間 ${pct(prev)}（${sign(Math.round(cur * 100) - Math.round(prev * 100))}pt）`;
-  if (kind === 'days') return `前の期間 ${prev.toFixed(1)}日（${sign(Number((cur - prev).toFixed(1)))}日）`;
-  return `前の期間 ${prev}件（${sign(cur - prev)}件）`;
+// 前の期間との差を「▲ 3件」「▼ 2pt」のような印で表す。upIsGood: 増えるのが良いことか（null は良し悪しなし）
+function delta(cur, prev, kind, hasPrev, upIsGood) {
+  if (!hasPrev || prev == null || cur == null) return [el('span', { className: 'delta', textContent: '比較なし' })];
+  const diff = kind === 'rate' ? Math.round(cur * 100) - Math.round(prev * 100) : kind === 'days' ? Number((cur - prev).toFixed(1)) : cur - prev;
+  const unit = { rate: 'pt', days: '日', count: '件' }[kind];
+  const tone = diff === 0 || upIsGood == null ? '' : (diff > 0) === upIsGood ? ' good' : ' bad';
+  const word = diff === 0 ? '変わらず' : `${diff > 0 ? '▲' : '▼'} ${Math.abs(diff)}${unit}`;
+  const before = kind === 'rate' ? pct(prev) : kind === 'days' ? `${prev.toFixed(1)}日` : `${prev}件`;
+  return [el('span', { className: 'delta' + tone, textContent: word }), el('span', { className: 'prev', textContent: `前の期間 ${before}` })];
 }
 let rulesInfo = null;
 async function loadAnalytics() {
@@ -435,15 +498,15 @@ async function loadAnalytics() {
   const p = a.previous.totals;
   const has = p.total > 0;
   $('periodNote').textContent = `集計期間 ${a.period.from}〜${a.period.to}。比較している「前の期間」は ${a.previous.period.from}〜${a.previous.period.to} です。`;
-  const kpi = (label, value, ...subs) => el('div', { className: 'card kpi' }, el('span', { className: 'muted', textContent: label }),
-    el('b', { textContent: value }), ...subs.map((s) => el('span', { className: 'muted', style: 'display:block', textContent: s })));
+  const kpi = (label, value, unit, parts) => el('div', { className: 'card kpi' }, el('span', { className: 'lbl', textContent: label }),
+    el('b', null, value, el('small', { textContent: unit })), ...parts);
   $('kpis').replaceChildren(
-    kpi('予約件数', `${t.total}件`, versus(t.total, p.total, 'count', has)),
-    kpi('稼働率', pct(t.utilization), versus(t.utilization, p.utilization, 'rate', has)),
-    kpi('キャンセル率', pct(t.cancelRate), versus(t.cancelRate, p.cancelRate, 'rate', has)),
-    kpi('無断キャンセル率', pct(t.noshowRate), versus(t.noshowRate, p.noshowRate, 'rate', has)),
-    kpi('平均リードタイム', t.avgLeadDays == null ? '—' : `${t.avgLeadDays.toFixed(1)}日`, versus(t.avgLeadDays, p.avgLeadDays, 'days', has)),
-    kpi('リピート率', t.customers ? pct(t.repeatRate) : '—', versus(t.repeatRate, p.repeatRate, 'rate', has && p.customers > 0)));
+    kpi('予約件数', String(t.total), '件', delta(t.total, p.total, 'count', has, true)),
+    kpi('稼働率', String(Math.round(t.utilization * 100)), '%', delta(t.utilization, p.utilization, 'rate', has, true)),
+    kpi('キャンセル率', String(Math.round(t.cancelRate * 100)), '%', delta(t.cancelRate, p.cancelRate, 'rate', has, false)),
+    kpi('無断キャンセル率', String(Math.round(t.noshowRate * 100)), '%', delta(t.noshowRate, p.noshowRate, 'rate', has, false)),
+    kpi('平均リードタイム', t.avgLeadDays == null ? '—' : t.avgLeadDays.toFixed(1), t.avgLeadDays == null ? '' : '日', delta(t.avgLeadDays, p.avgLeadDays, 'days', has, null)),
+    kpi('リピート率', t.customers ? String(Math.round(t.repeatRate * 100)) : '—', t.customers ? '%' : '', delta(t.repeatRate, p.repeatRate, 'rate', has && p.customers > 0, true)));
 
   // 推移グラフ（積み上げ棒）
   const buckets = a.trend.buckets;
@@ -455,16 +518,17 @@ async function loadAnalytics() {
     el('div', { className: 'area' },
       el('div', { className: 'c', style: `height:${(b.cancelled / max) * 100}%` }),
       el('div', { className: 'a', style: `height:${(b.active / max) * 100}%` })),
-    el('div', { className: 'lab', textContent: i % every === 0 ? b.label : '' }))));
+  )));
+  $('trendLabels').replaceChildren(...buckets.map((b, i) => el('span', { textContent: i % every === 0 ? b.label : '' })));
   $('trend').setAttribute('role', 'img');
   $('trend').setAttribute('aria-label', `${a.trend.unit}ごとの予約件数。` + buckets.map((b) => `${b.label} ${b.active + b.cancelled}件`).join('、'));
 
   const tags = { warn: '要対応', idea: '提案', info: '注意', good: '良好' };
   $('suggestions').replaceChildren(...(a.suggestions.length ? a.suggestions.map((s) => el('div', { className: 'card sug ' + s.level },
-    el('div', { className: 'head' }, el('span', { className: 'rank', textContent: `優先度 ${s.priority}` }), el('span', { className: 'kind', textContent: tags[s.level] })),
-    el('h3', { textContent: s.title }),
-    el('p', { className: 'muted', textContent: '根拠: ' + s.evidence }), el('p', { textContent: s.action }),
-    s.impact ? el('p', { className: 'impact', textContent: s.impact.text }) : null))
+    el('div', { className: 'rank' }, el('small', { textContent: '優先度' }), String(s.priority)),
+    el('div', null, el('span', { className: 'kind', textContent: tags[s.level] }), el('h3', { textContent: s.title }),
+      el('p', { className: 'evi', textContent: '根拠: ' + s.evidence }), el('p', { textContent: s.action }),
+      s.impact ? el('p', { className: 'impact', textContent: s.impact.text }) : null)))
     : [empty('改善案を出すためのデータがまだありません。')]));
   bars('chartWeekday', a.byWeekday.filter((w) => w.capacity > 0).map((w) => ({ label: w.label + '曜', value: w.utilization, count: w.count })), (r) => `${pct(r.value)}・${r.count}件`);
   bars('chartHour', a.byHour.map((h) => ({ label: h.label, value: h.count })), (r) => `${r.value}件`);
@@ -585,14 +649,14 @@ function renderSettings() {
       for (const d of [2, 3, 4, 5]) s.hours[d] = s.hours[1] ? { ...s.hours[1] } : null;
       dirty(); renderSettings();
     });
-    return el('div', { className: 'stack-s', style: 'border-top:1px solid var(--line);padding-top:14px' },
+    return el('div', { className: 'stack-s block-item' },
       el('div', { className: 'row' },
         el('label', { className: 'grow' }, '名前', input({ value: s.name, maxLength: 40 }, (x) => { s.name = x.value; })),
         el('div', { style: 'align-self:end' }, remove(draft.staff, i, s.name || '担当者'))),
       el('div', { className: 'hours-head', textContent: '受付する曜日／開始〜終了／休憩（任意）' }),
       el('div', { className: 'hours' }, ...rows), copy);
   }));
-  $('serviceList').replaceChildren(...draft.services.map((v, i) => el('div', { className: 'stack-s', style: 'border-top:1px solid var(--line);padding-top:14px' },
+  $('serviceList').replaceChildren(...draft.services.map((v, i) => el('div', { className: 'stack-s block-item' },
     el('div', { className: 'row' },
       el('label', { className: 'grow' }, 'メニュー名', input({ value: v.name, maxLength: 40 }, (x) => { v.name = x.value; })),
       el('label', { style: 'width:7.5em' }, '所要時間（分）', input({ type: 'number', inputMode: 'numeric', min: 5, max: 480, step: 5, value: v.minutes }, (x) => { v.minutes = Number(x.value); })),

@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0d6b5f">
+<meta name="theme-color" content="#16264a">
 <title>予約管理</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body class="admin">
 
 <!-- ログイン -->
-<main id="login" class="wrap" hidden>
+<main id="login" class="login-wrap" hidden>
   <form id="loginForm" class="card stack login">
     <h1>予約管理にログイン</h1>
     <label>ログインID<input name="loginId" required autocomplete="username" autocapitalize="off" spellcheck="false"></label>
@@ -63,12 +63,24 @@
       </div>
     </div>
     <div id="strip" class="strip"></div>
-    <div id="week" class="week"></div>
+    <div id="week" class="tgrid">
+      <div id="weekHead" class="thead"></div>
+      <div id="weekBody" class="tbody"></div>
+    </div>
+    <div id="weekFoot" class="row spread">
+      <div class="cal-legend">
+        <span><i style="border-color:var(--accent);background:var(--accent-soft)"></i>予約済</span>
+        <span><i style="border-color:var(--good);background:var(--good-soft)"></i>完了</span>
+        <span><i style="border-color:var(--bad);background:var(--bad-soft)"></i>無断キャンセル</span>
+        <span><i style="border-color:var(--line-strong);background:var(--surface-2)"></i>予定・受付時間外</span>
+      </div>
+      <label class="check muted"><input type="checkbox" id="showCancelled">キャンセルも表示</label>
+    </div>
     <div id="month" hidden>
       <div class="cal-head" aria-hidden="true"><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span><span>日</span></div>
       <div id="monthGrid" class="cal mcal"></div>
     </div>
-    <p class="muted">「予定を追加」で入れた時間と休業日は、予約ページの空き枠から自動で外れます。</p>
+    <p class="muted">空いている時間を押すと、その時刻で予約を追加できます。「予定を追加」で入れた時間と休業日は、予約ページの空き枠から自動で外れます。</p>
     <button id="fab" class="fab primary" aria-label="予約を追加"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
   </section>
 
@@ -133,10 +145,11 @@
     <div id="kpis" class="kpis"></div>
     <div class="card">
       <h3 id="trendTitle">予約件数の推移</h3>
-      <p class="muted"><span class="key" style="background:var(--accent)"></span>実施・予約中　<span class="key" style="background:var(--warn)"></span>キャンセル</p>
+      <p class="muted"><span class="key" style="background:var(--accent)"></span>実施・予約中　<span class="key" style="background:var(--gold-line)"></span>キャンセル</p>
       <div id="trend" class="trend"></div>
+      <div id="trendLabels" class="trend-labels" aria-hidden="true"></div>
     </div>
-    <h2>改善案（優先度の高い順）</h2>
+    <h3 class="subhead">改善案（優先度の高い順）</h3>
     <div id="suggestions" class="stack"></div>
     <div class="grid2">
       <div class="card"><h3>曜日別の稼働率</h3><p class="muted">受付可能な時間のうち、予約で埋まった割合</p><div id="chartWeekday" class="bars"></div></div>

@@ -241,6 +241,7 @@ $('customer').addEventListener('submit', async (ev) => {
     $('siteName').textContent = site.name;
     $('siteIntro').textContent = site.intro;
     $('siteIntro').hidden = !site.intro;
+    $('foot').textContent = site.name;
     if (q.get('id') && q.get('token')) {
       return showBooking(await call(`/api/public/booking?id=${encodeURIComponent(q.get('id'))}&token=${encodeURIComponent(q.get('token'))}`));
     }

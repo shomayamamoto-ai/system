@@ -3,16 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0d6b5f">
+<meta name="theme-color" content="#16264a">
 <title>面談・相談のご予約</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<main class="wrap narrow stack">
-  <div class="hero">
+<header class="hero">
+  <div class="wrap narrow">
+    <div class="eyebrow">ONLINE RESERVATION</div>
     <h1 id="siteName">面談・相談のご予約</h1>
     <p id="siteIntro" hidden></p>
   </div>
+</header>
+<main class="wrap narrow stack">
   <div id="error" class="msg error" role="alert" hidden></div>
 
   <!-- 予約フォーム -->
@@ -28,7 +31,7 @@
     </section>
     <section class="card stack" id="secDate">
       <h2>日時を選ぶ</h2>
-      <div class="row spread">
+      <div class="row spread month-nav">
         <button id="prev" type="button" class="small">← 前の月</button>
         <strong id="monthLabel"></strong>
         <button id="next" type="button" class="small">次の月 →</button>
@@ -55,11 +58,11 @@
 
   <!-- 予約完了・予約確認 -->
   <section id="done" class="card stack" hidden>
-    <div class="row">
+    <div class="done-head">
       <div class="done-icon" id="doneIcon"><svg class="ic" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
-      <h2 id="doneTitle" class="grow">ご予約を受け付けました</h2>
+      <h2 id="doneTitle">ご予約を受け付けました</h2>
+      <p id="doneMail" class="muted" hidden>ご入力のメールアドレスあてに、確認メールをお送りしました。</p>
     </div>
-    <p id="doneMail" class="muted" hidden>ご入力のメールアドレスあてに、確認メールをお送りしました。</p>
     <dl class="summary" id="doneSummary"></dl>
     <div id="doneBlocked" class="msg info" hidden></div>
     <div class="actions" id="doneActions">
@@ -75,8 +78,9 @@
         <button id="copy" type="button">コピー</button>
       </div>
     </div>
-    <div><a class="btn ghost" href="/">新しく予約する</a></div>
+    <div style="text-align:center"><a class="btn ghost" href="/">新しく予約する</a></div>
   </section>
+  <p class="foot" id="foot"></p>
 </main>
 
 <!-- 画面下に固定: 選んだ内容と「予約する」ボタン -->
