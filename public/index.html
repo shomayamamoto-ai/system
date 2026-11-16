@@ -24,13 +24,18 @@
     <section class="card stack">
       <h2>日時を選ぶ</h2>
       <div class="row spread">
-        <button id="prev" type="button" class="small">← 前の週</button>
-        <span id="range" class="muted"></span>
-        <button id="next" type="button" class="small">次の週 →</button>
+        <button id="prev" type="button" class="small">← 前の月</button>
+        <strong id="monthLabel"></strong>
+        <button id="next" type="button" class="small">次の月 →</button>
       </div>
-      <div id="days" class="days"></div>
-      <div id="slots" class="slots"></div>
-      <p id="slotsNote" class="muted"></p>
+      <div>
+        <div class="cal-head" aria-hidden="true"><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span><span>日</span></div>
+        <div id="days" class="cal"></div>
+      </div>
+      <p class="muted legend"><span>○ 空きあり</span><span>△ 残りわずか</span><span>× 空きなし</span></p>
+      <h3 id="slotTitle"></h3>
+      <div id="slots"></div>
+      <p id="slotsNote" class="muted" aria-live="polite"></p>
     </section>
     <section class="card stack">
       <h2>お客様情報を入力する</h2>
@@ -38,10 +43,10 @@
         <div class="fields">
           <label>お名前（必須）<input name="customerName" required maxlength="80" autocomplete="name"></label>
           <label>メールアドレス（必須）<input name="email" type="email" required maxlength="120" autocomplete="email"></label>
-          <label>電話番号<input name="phone" type="tel" maxlength="30" autocomplete="tel"></label>
+          <label>電話番号（任意）<input name="phone" type="tel" maxlength="30" autocomplete="tel"></label>
         </div>
         <label>ご相談したい内容（任意）<textarea name="note" maxlength="500"></textarea></label>
-        <p id="picked" class="muted">日時を選ぶと、ここに予約内容が表示されます。</p>
+        <p id="picked" class="muted" aria-live="polite"></p>
         <button class="primary" type="submit" id="submit" disabled>この内容で予約する</button>
       </form>
     </section>
@@ -54,7 +59,10 @@
     <p class="muted" id="doneNote">
       下のリンクを保存しておくと、あとから予約の確認とキャンセルができます。
     </p>
-    <input id="doneLink" readonly aria-label="予約確認用のリンク">
+    <div class="row" id="doneLinkRow">
+      <input id="doneLink" readonly aria-label="予約確認用のリンク" style="flex:1;min-width:0;margin:0">
+      <button id="copy" type="button">コピー</button>
+    </div>
     <div class="row">
       <button id="cancel" type="button" class="danger">この予約をキャンセルする</button>
       <a class="btn" href="/">新しく予約する</a>

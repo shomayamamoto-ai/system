@@ -124,3 +124,82 @@ test('設定: これからの予約がある担当者は削除できない', () 
   assert.equal(db.staff[2].hours[1].start, '09:00');
   assert.equal(db.settings.slotMinutes, 15);
 });
+
+test('管理画面からの予約: 受付時間外でも登録でき、重なりは拒否する', () => {
+  const db = fresh();
+  const b = core.createBooking(db, { serviceId: 'v1', staffId: 's1', date: '2026-11-21', start: '20:00', customerName: '電話のお客様' }, NOW, { admin: true });
+  assert.equal(b.source, 'admin');
+  assert.throws(() => core.createBooking(db, { serviceId: 'v1', staffId: 's1', date: '2026-11-21', start: '20:15', customerName: '別の人' }, NOW, { admin: true }), /別の予約/);
+  assert.throws(() => core.createBooking(db, { serviceId: 'v1', staffId: 's1', date: '2026-11-21', start: '21:00', customerName: 'x', email: 'bad' }, NOW, { admin: true }), /メールアドレス/);
+});
+
+test('日時変更: 空いていれば移動でき、元の枠が空く。重なりは拒否する', () => {
+  const db = fresh();
+  const a = book(db);
+  const other = book(db, { start: '14:00', customerName: '佐藤' });
+  assert.throws(() => core.rescheduleBooking(db, a.id, { date: '2026-11-17', start: '14:30' }, NOW), /別の予約/);
+  core.rescheduleBooking(db, a.id, { date: '2026-11-17', start: '10:30' }, NOW); // 自分自身とは重なってよい
+  core.rescheduleBooking(db, a.id, { date: '2026-11-18', start: '09:00', staffId: 's2' }, NOW);
+  assert.deepEqual([a.date, a.start, a.end, a.staffId], ['2026-11-18', 540, 600, 's2']);
+  assert.ok(core.freeSlots(db, { date: '2026-11-17', serviceId: 'v2', staffId: 's1' }, NOW).some((s) => s.start === '10:00'));
+  assert.equal(db.notifications.at(-1).type, 'booking_change');
+  core.setBookingStatus(db, other.id, 'completed', NOW);
+  assert.throws(() => core.rescheduleBooking(db, other.id, { date: '2026-11-19', start: '09:00' }, NOW), /予約済/);
+});
+
+test('空き状況: 日ごとの枠数が返り、埋まると減る', () => {
+  const db = fresh();
+  const before = core.availability(db, { from: '2026-11-01', to: '2026-11-30', serviceId: 'v2', staffId: 's1' }, NOW);
+  assert.equal(before['2026-11-15'], undefined); // 過去
+  assert.equal(before['2026-11-21'], 0); // 土曜
+  book(db);
+  const after = core.availability(db, { from: '2026-11-17', to: '2026-11-17', serviceId: 'v2', staffId: 's1' }, NOW);
+  assert.equal(after['2026-11-17'], before['2026-11-17'] - 3);
+});
+
+test('検索・顧客・書き出し: 書き出したCSVは、そのまま読み込み直せる', () => {
+  const db = fresh();
+  book(db, { note: '=SUM(A1)と"引用符", 改行\nあり', phone: '090-0000-0000' });
+  book(db, { start: '14:00' });
+  core.setBookingStatus(db, db.bookings[1].id, 'cancelled', NOW);
+  book(db, { start: '16:00', customerName: '佐藤', email: 'b@example.com' });
+  assert.equal(core.searchBookings(db, { q: '佐藤' }).total, 1);
+  assert.equal(core.searchBookings(db, { status: 'cancelled' }).total, 1);
+  assert.equal(core.searchBookings(db, { from: '2026-11-18' }).total, 0);
+  const { customers } = core.customers(db);
+  const yamada = customers.find((c) => c.email === 'a@example.com');
+  assert.deepEqual([yamada.total, yamada.cancelled, yamada.history.length, yamada.phone], [2, 1, 2, '090-0000-0000']);
+
+  const csv = core.exportCsv(db);
+  assert.ok(csv.includes(`"'=SUM(A1)と""引用符"", 改行\nあり"`)); // 数式として動かないよう ' が付く
+  const copy = fresh();
+  const r = core.importCsv(copy, csv, NOW);
+  assert.equal(r.imported, 3);
+  assert.deepEqual(copy.bookings.map((b) => [b.date, b.start, b.customerName, b.status]).sort(),
+    db.bookings.map((b) => [b.date, b.start, b.customerName, b.status]).sort());
+});
+
+test('分析: 前の期間との比較・推移・優先順位・目安の変更', () => {
+  const { updateRules } = require('../lib/analytics');
+  const db = fresh();
+  core.seedSample(db, NOW);
+  const a = analyze(db, '2026-10-18', '2026-11-16', NOW);
+  assert.deepEqual(a.previous.period, { from: '2026-09-18', to: '2026-10-17' });
+  assert.ok(a.previous.totals.total > 0);
+  assert.equal(a.trend.unit, '週');
+  assert.equal(a.trend.buckets.reduce((n, b) => n + b.active + b.cancelled, 0), a.totals.total);
+  assert.deepEqual(a.suggestions.map((s) => s.priority), a.suggestions.map((_, i) => i + 1));
+  const levels = a.suggestions.map((s) => ['warn', 'idea', 'info', 'good'].indexOf(s.level));
+  assert.deepEqual(levels, levels.slice().sort());
+  assert.equal(analyze(db, '2025-11-17', '2026-11-16', NOW).trend.unit, '月');
+
+  // 無断キャンセル率の目安を100%にすると、その改善案は出なくなる
+  assert.ok(a.suggestions.some((s) => s.title.startsWith('無断キャンセル')));
+  updateRules(db, Object.assign({}, a.rules, { noshowRate: 1 }));
+  assert.ok(!analyze(db, '2026-10-18', '2026-11-16', NOW).suggestions.some((s) => s.title.startsWith('無断キャンセル')));
+  assert.throws(() => updateRules(db, Object.assign({}, a.rules, { cancelRate: 5 })), /キャンセル率/);
+  core.updateConfig(db, { staff: db.staff, services: db.services, settings: {} });
+  assert.equal(db.settings.rules.noshowRate, 1); // 設定を保存しても目安は消えない
+  updateRules(db, { reset: true });
+  assert.equal(db.settings.rules, undefined);
+});

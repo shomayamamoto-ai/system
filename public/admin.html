@@ -7,17 +7,34 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+
+<!-- ログイン -->
+<main id="login" class="wrap" hidden>
+  <form id="loginForm" class="card stack login">
+    <h1>予約管理にログイン</h1>
+    <label>パスワード<input name="password" type="password" required autocomplete="current-password"></label>
+    <div id="loginError" class="msg error" role="alert" hidden></div>
+    <button class="primary" type="submit">ログイン</button>
+  </form>
+</main>
+
+<div id="app" hidden>
 <header class="top">
   <div class="wrap">
     <div class="row spread">
       <h1>予約管理</h1>
-      <a class="btn small" href="/" target="_blank" rel="noopener">予約ページを開く</a>
+      <div class="row">
+        <a class="btn small" href="/" target="_blank" rel="noopener">予約ページを開く</a>
+        <button id="logout" class="small" hidden>ログアウト</button>
+      </div>
     </div>
     <nav class="tabs" id="tabs">
       <button data-tab="calendar" class="on">カレンダー</button>
+      <button data-tab="list">予約一覧</button>
+      <button data-tab="customers">顧客</button>
       <button data-tab="notes">通知 <span id="unread" class="badge" hidden></span></button>
       <button data-tab="analytics">分析・改善案</button>
-      <button data-tab="import">データ読み込み</button>
+      <button data-tab="import">データ</button>
       <button data-tab="settings">設定</button>
     </nav>
   </div>
@@ -34,18 +51,64 @@
   <section id="tab-calendar" class="stack">
     <div class="row spread">
       <div class="row">
-        <button id="calPrev" class="small">← 前の週</button>
-        <button id="calToday" class="small">今週</button>
-        <button id="calNext" class="small">次の週 →</button>
+        <button id="calPrev" class="small" aria-label="前へ">←</button>
+        <button id="calToday" class="small">今日</button>
+        <button id="calNext" class="small" aria-label="次へ">→</button>
         <strong id="calRange"></strong>
       </div>
       <div class="row">
+        <span class="seg">
+          <button id="viewWeek" class="small on">週</button>
+          <button id="viewMonth" class="small">月</button>
+        </span>
         <select id="calStaff" aria-label="担当者で絞り込む" style="width:auto;margin:0"></select>
-        <button id="addBlock" class="primary">予定を追加</button>
+        <button id="addBooking" class="primary">予約を追加</button>
+        <button id="addBlock">予定を追加</button>
       </div>
     </div>
     <p class="muted">「予定を追加」で入れた時間は、予約ページの空き枠から自動で外れます。予約や予定を押すと詳細を開けます。</p>
     <div id="week" class="week"></div>
+    <div id="month" hidden>
+      <div class="cal-head" aria-hidden="true"><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span><span>日</span></div>
+      <div id="monthGrid" class="cal mcal"></div>
+    </div>
+  </section>
+
+  <!-- 予約一覧 -->
+  <section id="tab-list" class="stack" hidden>
+    <h2>予約一覧</h2>
+    <form id="listForm" class="card toolbar">
+      <label>キーワード<input name="q" placeholder="名前・メール・電話・相談内容"></label>
+      <label>状態
+        <select name="status">
+          <option value="">すべて</option>
+          <option value="booked">予約済</option>
+          <option value="completed">完了</option>
+          <option value="noshow">無断キャンセル</option>
+          <option value="cancelled">キャンセル</option>
+        </select>
+      </label>
+      <label>開始日<input name="from" type="date"></label>
+      <label>終了日<input name="to" type="date"></label>
+      <div class="row">
+        <button class="primary" type="submit">検索</button>
+        <button type="button" id="exportCsv">CSVで書き出す</button>
+      </div>
+    </form>
+    <p id="listCount" class="muted"></p>
+    <div class="card scroll"><table id="listTable"></table></div>
+  </section>
+
+  <!-- 顧客 -->
+  <section id="tab-customers" class="stack" hidden>
+    <h2>顧客</h2>
+    <form id="custForm" class="card toolbar">
+      <label>キーワード<input name="q" placeholder="名前・メール・電話"></label>
+      <div class="row"><button class="primary" type="submit">検索</button></div>
+    </form>
+    <p id="custCount" class="muted"></p>
+    <div class="card scroll"><table id="custTable"></table></div>
+    <p class="muted">メールアドレスが同じ予約を、同じお客様としてまとめています。行を押すと来談履歴を開けます。</p>
   </section>
 
   <!-- 通知 -->
@@ -70,24 +133,40 @@
         </select>
       </label>
     </div>
+    <p id="periodNote" class="muted"></p>
     <div id="kpis" class="kpis"></div>
-    <h2>改善案</h2>
+    <div class="card">
+      <h3 id="trendTitle">予約件数の推移</h3>
+      <p class="muted"><span class="key" style="background:var(--accent)"></span>実施・予約中　<span class="key" style="background:var(--warn)"></span>キャンセル</p>
+      <div id="trend" class="trend"></div>
+    </div>
+    <h2>改善案（優先度の高い順）</h2>
     <div id="suggestions" class="stack"></div>
-    <p class="muted">
-      改善案は、あらかじめ決めた目安の数値と比べて自動で出しています（AIは使っていません）。
-      目安は初期値なので、lib/analytics.js の RULES で変更できます。
-    </p>
     <div class="grid2">
       <div class="card"><h3>曜日別の稼働率</h3><p class="muted">受付可能な時間のうち、予約で埋まった割合</p><div id="chartWeekday" class="bars"></div></div>
       <div class="card"><h3>時間帯別の予約件数</h3><p class="muted">開始時刻ごとの件数（キャンセルを除く）</p><div id="chartHour" class="bars"></div></div>
       <div class="card"><h3>担当者別の稼働率</h3><p class="muted">担当者ごとの埋まり具合</p><div id="chartStaff" class="bars"></div></div>
       <div class="card"><h3>メニュー別の予約件数</h3><p class="muted">キャンセルを含む申し込み件数</p><div id="chartService" class="bars"></div></div>
     </div>
+    <details class="card">
+      <summary>改善案を出す目安の数値を変更する</summary>
+      <div class="stack">
+        <p class="muted">
+          改善案は、下の目安と実際の数字を比べて自動で出しています（AIは使っていません）。
+          初期値は仮に置いたもので、業界の公式な基準ではありません。実際の運用に合わせて調整してください。
+        </p>
+        <div id="rules" class="fields"></div>
+        <div class="row">
+          <button id="rulesSave" class="primary">目安を保存する</button>
+          <button id="rulesReset">初期値に戻す</button>
+        </div>
+      </div>
+    </details>
   </section>
 
-  <!-- データ読み込み -->
+  <!-- データ -->
   <section id="tab-import" class="stack" hidden>
-    <h2>データ読み込み</h2>
+    <h2>データの読み込み・書き出し</h2>
     <div class="card stack">
       <h3>過去の予約データ（CSV）を読み込む</h3>
       <p class="muted">
@@ -98,10 +177,15 @@
 2026-10-01,10:00,初回相談（30分）,担当者A,山田 太郎,taro@example.com,完了,2026-09-25
 2026-10-02,14:00,個別面談（60分）,担当者B,佐藤 花子,hanako@example.com,キャンセル,2026-09-20</pre>
       <p class="muted">ステータスは「予約済／完了／キャンセル／無断キャンセル」のいずれかです。文字コードは UTF-8 で保存してください。</p>
-      <input type="file" id="csvFile" accept=".csv,text/csv">
+      <input type="file" id="csvFile" accept=".csv,text/csv" aria-label="CSVファイル">
       <div><button id="csvRun" class="primary">読み込む</button></div>
       <div id="csvResult" class="msg ok" hidden></div>
       <div id="csvSkipped" class="scroll" hidden></div>
+    </div>
+    <div class="card stack">
+      <h3>すべての予約をCSVで書き出す</h3>
+      <p class="muted">読み込みと同じ形式で保存します。控えを取るときや、Excelで集計するときに使えます。</p>
+      <div><a class="btn" href="/api/admin/export" download>CSVで書き出す</a></div>
     </div>
     <div class="card stack">
       <h3>サンプルデータで試す</h3>
@@ -136,22 +220,50 @@
     </div>
     <div class="row">
       <button id="saveSettings" class="primary">設定を保存する</button>
-      <span id="saved" class="muted"></span>
+      <span id="saved" class="muted" aria-live="polite"></span>
     </div>
   </section>
 </main>
+</div>
 
 <dialog id="detail">
   <div class="stack">
     <h2 id="detailTitle"></h2>
     <dl class="summary" id="detailBody"></dl>
+    <div id="detailExtra" class="history" hidden></div>
     <div class="row" id="detailActions"></div>
     <div><button id="detailClose">閉じる</button></div>
   </div>
 </dialog>
 
+<dialog id="bookingDialog">
+  <form id="bookingForm" class="stack">
+    <h2 id="bookingTitle">予約を追加</h2>
+    <p class="muted" id="bookingLead"></p>
+    <label id="bkServiceWrap">メニュー<select name="serviceId" required></select></label>
+    <label>担当者<select name="staffId" required></select></label>
+    <div class="fields">
+      <label>日付<input name="date" type="date" required></label>
+      <label>開始時刻<input name="start" type="time" required step="300"></label>
+    </div>
+    <fieldset id="bkCustomer" class="stack" style="border:none;padding:0;margin:16px 0 0">
+      <label>お名前（必須）<input name="customerName" required maxlength="80"></label>
+      <div class="fields">
+        <label>メール（任意）<input name="email" type="email" maxlength="120"></label>
+        <label>電話（任意）<input name="phone" type="tel" maxlength="30"></label>
+      </div>
+      <label>相談内容・メモ（任意）<textarea name="note" maxlength="500"></textarea></label>
+    </fieldset>
+    <div id="bookingError" class="msg error" role="alert" hidden></div>
+    <div class="row">
+      <button class="primary" type="submit" id="bookingSubmit">登録する</button>
+      <button type="button" data-close>やめる</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="blockDialog">
-  <form id="blockForm" class="stack" method="dialog">
+  <form id="blockForm" class="stack">
     <h2>予定を追加</h2>
     <p class="muted">会議・外出・休みなど、予約を受けられない時間を登録します。</p>
     <label>担当者<select name="staffId" required></select></label>
@@ -161,10 +273,10 @@
       <label>開始<input name="start" type="time" required value="12:00"></label>
       <label>終了<input name="end" type="time" required value="13:00"></label>
     </div>
-    <div id="blockError" class="msg error" hidden></div>
+    <div id="blockError" class="msg error" role="alert" hidden></div>
     <div class="row">
       <button class="primary" type="submit">追加する</button>
-      <button type="button" id="blockCancel">やめる</button>
+      <button type="button" data-close>やめる</button>
     </div>
   </form>
 </dialog>
