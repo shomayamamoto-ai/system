@@ -271,3 +271,128 @@ test('前日リマインド: 設定の時刻以降に、明日の予約だけが
   assert.match(m.subject, /明日のご予約/);
   assert.ok(!m.text.includes('http')); // 公開URLが未設定ならリンクは入れない
 });
+
+test('祝日: 法律のルールどおりに計算され、休業日へまとめて登録できる', () => {
+  const { holidays } = require('../lib/holidays');
+  const of = (y) => Object.fromEntries(holidays(y).map((h) => [h.date, h.title]));
+  const y26 = of(2026);
+  assert.equal(Object.keys(y26).length, 18);
+  assert.equal(y26['2026-01-12'], '成人の日'); // 1月の第2月曜
+  assert.equal(y26['2026-03-20'], '春分の日');
+  assert.equal(y26['2026-05-06'], '振替休日'); // 5/3（日）の振替は、祝日が続くので 5/6
+  assert.equal(y26['2026-09-22'], '国民の休日'); // 敬老の日と秋分の日にはさまれた平日
+  const y27 = of(2027);
+  assert.equal(y27['2027-03-21'], '春分の日');
+  assert.equal(y27['2027-03-22'], '振替休日');
+  assert.equal(of(2021)['2021-07-23'], 'スポーツの日'); // 東京オリンピックの特例
+  assert.equal(of(2024)['2024-02-12'], '振替休日');
+  assert.deepEqual(holidays(1999), []);
+
+  const db = fresh();
+  book(db, { date: '2026-11-23', start: '10:00' }); // 勤労感謝の日に予約あり
+  const r = core.addHolidays(db, 2026, NOW);
+  assert.deepEqual(r.added.map((h) => h.date), []); // 11/16 以降の祝日は 11/23 だけで、予約があるので登録しない
+  assert.match(r.skipped[0].reason, /予約が1件/);
+  const next = core.addHolidays(db, 2027, NOW);
+  assert.equal(next.added.length, 17);
+  assert.deepEqual(core.freeSlots(db, { date: '2027-01-01', serviceId: 'v1', staffId: 'any' }, new Date('2026-12-20T00:00:00Z')), []);
+  assert.equal(core.addHolidays(db, 2027, NOW).added.length, 0); // 2回押しても重複しない
+  assert.throws(() => core.addHolidays(db, 1990, NOW), /2020年〜2099年/);
+});
+
+test('事前アンケート: 必須・選択肢を確かめ、回答を質問文と一緒に保存する', () => {
+  const db = fresh();
+  core.updateConfig(db, { staff: db.staff, services: db.services, settings: { questions: [
+    { label: 'ご希望の面談方法', type: 'select', options: '対面\nオンライン', required: true },
+    { label: 'きっかけ', type: 'text' },
+  ] } });
+  const [q1, q2] = db.settings.questions;
+  assert.deepEqual(q1.options, ['対面', 'オンライン']);
+  assert.throws(() => book(db), /ご希望の面談方法/);
+  assert.throws(() => book(db, { answers: { [q1.id]: '電話' } }), /選択肢の中から/);
+  assert.throws(() => book(db, { answers: [] }), /ご希望の面談方法/);
+  const b = book(db, { answers: { [q1.id]: 'オンライン', [q2.id]: ' 知人の紹介 ', other: 'x', __proto__: { a: 1 } } });
+  assert.deepEqual(b.answers, [{ label: 'ご希望の面談方法', value: 'オンライン' }, { label: 'きっかけ', value: '知人の紹介' }]);
+  // 管理画面からの登録では、アンケートは求めない
+  core.createBooking(db, { serviceId: 'v1', staffId: 's2', date: '2026-11-17', start: '20:00', customerName: '電話' }, NOW, { admin: true });
+  // 質問を変えても、当時の回答は残る。ほかの設定を保存しても質問は消えない
+  core.updateConfig(db, { staff: db.staff, services: db.services, settings: { slotMinutes: 30 } });
+  assert.equal(db.settings.questions.length, 2);
+  core.updateConfig(db, { staff: db.staff, services: db.services, settings: { questions: [] } });
+  assert.equal(b.answers.length, 2);
+  assert.throws(() => core.updateConfig(db, { staff: db.staff, services: db.services, settings: { questions: [{ label: 'x', type: 'select', options: ['1つだけ'] }] } }), /2つ以上/);
+  assert.throws(() => core.updateConfig(db, { staff: db.staff, services: db.services, settings: { mail: { notifyTo: 'a@example.com, b@example.com' } } }), /通知先/);
+});
+
+test('面談メモ: 保存・検索・顧客履歴・CSVに反映される', () => {
+  const db = fresh();
+  const b = book(db);
+  core.setMemo(db, b.id, '次回までに資料を準備してもらう');
+  assert.equal(core.searchBookings(db, { q: '資料' }).total, 1);
+  assert.equal(core.customers(db).customers[0].history[0].memo, '次回までに資料を準備してもらう');
+  const copy = fresh();
+  core.importCsv(copy, core.exportCsv(db), NOW);
+  assert.equal(copy.bookings[0].memo, '次回までに資料を準備してもらう');
+  assert.throws(() => core.setMemo(db, 'nope', 'x'), /見つかりません/);
+});
+
+test('点検で見つかった問題の再発防止（不具合）', () => {
+  // メニューの所要時間を短くしたあとでも、日時変更で二重予約にならない
+  let db = fresh();
+  const long = book(db); // 60分
+  db.services[1].minutes = 30;
+  const other = book(db, { start: '11:00', customerName: '佐藤', email: 'b@example.com' }); // 11:00〜11:30 担当者A
+  core.addBlock(db, { staffId: 's2', date: '2026-11-17', start: '10:00', end: '19:00' }, NOW);
+  assert.throws(() => core.rescheduleByCustomer(db, long.id, long.token, { date: '2026-11-17', start: '10:30' }, NOW), /埋まっています/);
+  assert.throws(() => core.rescheduleByCustomer(db, long.id, long.token, { date: '2026-11-17', start: '17:30' }, NOW), /埋まっています/); // 18:00 を超える
+  core.rescheduleByCustomer(db, long.id, long.token, { date: '2026-11-17', start: '12:00' }, NOW);
+  assert.deepEqual([long.start, long.end, other.start], [720, 780, 660]);
+
+  // 受付締切は日付をまたいでも効く
+  db = fresh();
+  db.settings.minLeadMinutes = 1440;
+  const lateNight = new Date('2026-11-16T14:00:00Z'); // 日本時間 月曜23:00
+  const tue = core.freeSlots(db, { date: '2026-11-17', serviceId: 'v1', staffId: 's1' }, lateNight).map((x) => x.start);
+  assert.deepEqual(tue, []); // 火曜の受付（〜18:00）は、すべて24時間以内
+  assert.equal(core.freeSlots(db, { date: '2026-11-18', serviceId: 'v1', staffId: 's1' }, lateNight)[0].start, '09:00');
+
+  // CSV: スキップした行の担当者は作らない。追加した担当者は受付時間が空で、予約ページに出ない
+  db = fresh();
+  const r = core.importCsv(db, '日付,開始,担当者,メニュー,所要時間\n2026-10-01,23:50,退職者X,旧メニュー,60\n2026-10-02,10:00,新人Y,初回相談（30分）,45\n', NOW);
+  assert.equal(r.imported, 1);
+  assert.deepEqual(db.staff.map((x) => x.name), ['担当者A', '担当者B', '新人Y']);
+  assert.equal(db.services.length, 2);
+  assert.equal(db.bookings[0].end - db.bookings[0].start, 45); // 所要時間の列を優先
+  assert.deepEqual(core.freeSlots(db, { date: '2026-11-17', serviceId: 'v1', staffId: db.staff[2].id }, NOW), []);
+
+  // CSV: 書き出しで付けた ' は読み込みで外れ、同じデータを読み直しても増えない
+  db = fresh();
+  book(db, { customerName: '-田中', phone: '+81-90-1111', note: '=相談' });
+  const copy = fresh();
+  core.importCsv(copy, core.exportCsv(db), NOW);
+  assert.deepEqual([copy.bookings[0].customerName, copy.bookings[0].phone, copy.bookings[0].note], ['-田中', '+81-90-1111', '=相談']);
+  assert.equal(core.importCsv(copy, core.exportCsv(db), NOW).imported, 0);
+
+  // キャンセルを戻すとき、担当者が削除されていたら止める（設定が保存できなくなるのを防ぐ）
+  db = fresh();
+  const b = book(db, { staffId: 's2' });
+  core.setBookingStatus(db, b.id, 'cancelled', NOW);
+  core.updateConfig(db, { staff: [db.staff[0]], services: db.services });
+  assert.throws(() => core.setBookingStatus(db, b.id, 'booked', NOW), /削除されている/);
+
+  // サンプルは二重に登録できない。年をまたぐ推移グラフの見出しは重ならない
+  db = fresh();
+  core.seedSample(db, NOW);
+  assert.throws(() => core.seedSample(db, NOW), /すでに登録/);
+  const labels = analyze(db, '2025-11-17', '2026-11-16', NOW).trend.buckets.map((x) => x.label);
+  assert.equal(new Set(labels).size, labels.length);
+
+  // リマインド: 昼に入った翌日午後の予約にも送る。送信時刻より後に入った予約には送らない
+  const { dueReminders } = require('../lib/mailer');
+  db = fresh();
+  const noon = book(db, { start: '15:00' });
+  noon.createdAt = '2026-11-16T03:30:00.000Z'; // 日本時間 月曜12:30
+  assert.deepEqual(dueReminders(db, new Date('2026-11-16T09:05:00Z')).map((x) => x.id), [noon.id]); // 18:05
+  noon.createdAt = '2026-11-16T09:30:00.000Z'; // 18:30 に入った予約
+  assert.deepEqual(dueReminders(db, new Date('2026-11-16T10:00:00Z')), []);
+});

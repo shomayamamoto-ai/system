@@ -163,7 +163,7 @@ test('メール: 予約・変更・キャンセルで送られ、前日リマイ
   const sent = [];
   let fail = false;
   const mailer = { enabled: true, from: 'no-reply@example.com', send: async (m) => { if (fail) throw new Error('接続できません'); sent.push(m); } };
-  const s = await boot({ mailer, publicUrl: 'https://yoyaku.example.com/' });
+  const s = await boot({ mailer, publicUrl: 'https://yoyaku.example.com/', adminPassword: 'secret-pass' });
   try {
     const tick = () => new Promise((r) => setTimeout(r, 20));
     const today = core.nowJST().date;
@@ -198,7 +198,13 @@ test('メール: 予約・変更・キャンセルで送られ、前日リマイ
     const again = await s.req('/api/public/bookings', 'POST', { serviceId: 'v1', staffId: 's1', date: day5, start: slots[0], customerName: '鈴木', email: 'suzuki@example.com' });
     assert.equal(again.status, 201);
     await tick();
-    const notes = (await (await s.req('/api/admin/notifications')).json()).notifications;
+    // 公開用の設定（https）があるときは、ログインなしでは管理APIを使えない
+    assert.equal((await s.req('/api/admin/notifications')).status, 401);
+    const login = await s.req('/api/admin/login', 'POST', { loginId: 'admin', password: 'secret-pass' });
+    assert.match(login.headers.get('set-cookie'), /; Secure/);
+    assert.match(login.headers.get('strict-transport-security'), /max-age/);
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const notes = (await (await s.req('/api/admin/notifications', 'GET', null, { cookie })).json()).notifications;
     assert.ok(notes.some((n) => n.type === 'mail_error'));
   } finally { s.close(); }
 });
@@ -263,4 +269,119 @@ test('SMTP: 実際にメールサーバーへ接続して送信できる（テ�
     assert.match(received, /From: no-reply@example\.com/);
     assert.match(received, /To: yamada@example\.com/);
   } finally { smtp.close(); }
+});
+
+test('担当者への通知・面談メモ・自分のパスワード変更・月次の集計・監視用アドレス', async () => {
+  const sent = [];
+  const mailer = { enabled: true, from: 'no-reply@example.com', send: async (m) => { sent.push(m); } };
+  const s = await boot({ adminPassword: 'secret-pass', mailer, publicUrl: 'https://yoyaku.example.com' });
+  try {
+    assert.equal(await (await s.req('/healthz')).text(), 'ok');
+    const login = async (loginId, password) => ({ cookie: (await s.req('/api/admin/login', 'POST', { loginId, password })).headers.get('set-cookie').split(';')[0] });
+    const owner = await login('admin', 'secret-pass');
+    const cfg = await (await s.req('/api/admin/config', 'GET', null, owner)).json();
+    cfg.settings.mail.notifyTo = 'staff@example.com';
+    assert.equal((await s.req('/api/admin/config', 'PUT', cfg, owner)).status, 200);
+
+    const today = core.nowJST().date;
+    const days = (await (await s.req(`/api/public/availability?from=${today}&to=${core.addDays(today, 20)}&serviceId=v1&staffId=any`)).json()).days;
+    const date = Object.keys(days).sort().find((d) => d > today && days[d] > 0);
+    const { slots } = await (await s.req(`/api/public/slots?date=${date}&serviceId=v1&staffId=any`)).json();
+    const made = await (await s.req('/api/public/bookings', 'POST', { serviceId: 'v1', staffId: 'any', date, start: slots[0], customerName: '山田', email: 'yamada@example.com', note: '相続の相談' })).json();
+    await new Promise((r) => setTimeout(r, 20));
+    const toStaff = sent.find((m) => m.to === 'staff@example.com');
+    assert.match(toStaff.subject, /新しい予約が入りました/);
+    assert.ok(toStaff.text.includes('相続の相談') && toStaff.text.includes('https://yoyaku.example.com/admin'));
+    assert.ok(!toStaff.text.includes(made.token)); // お客様用の合言葉は載せない
+
+    // 面談メモは管理画面だけで見え、お客様用の応答には出ない
+    assert.equal((await s.req(`/api/admin/bookings/${made.id}`, 'PATCH', { memo: '社外秘のメモ' }, owner)).status, 200);
+    const pub = await (await s.req(`/api/public/booking?id=${made.id}&token=${made.token}`)).text();
+    assert.ok(!pub.includes('社外秘'));
+    assert.ok((await (await s.req('/api/admin/bookings?q=社外秘', 'GET', null, owner)).text()).includes('社外秘のメモ'));
+
+    // 自分のパスワード変更
+    await s.req('/api/admin/users', 'POST', { name: '山本', loginId: 'yama', password: 'first-password', role: 'staff' }, owner);
+    const staff = await login('yama', 'first-password');
+    assert.equal((await s.req('/api/admin/me/password', 'PUT', { current: 'wrong', next: 'second-password' }, staff)).status, 403);
+    assert.equal((await s.req('/api/admin/me/password', 'PUT', { current: 'first-password', next: 'short' }, staff)).status, 400);
+    assert.equal((await s.req('/api/admin/me/password', 'PUT', { current: 'first-password', next: 'second-password' }, staff)).status, 200);
+    assert.equal((await s.req('/api/admin/login', 'POST', { loginId: 'yama', password: 'first-password' })).status, 401);
+    assert.equal((await s.req('/api/admin/login', 'POST', { loginId: 'yama', password: 'second-password' })).status, 200);
+    assert.equal((await s.req('/api/admin/me/password', 'PUT', { current: 'secret-pass', next: 'another-password' }, owner)).status, 400); // admin は環境変数で変更
+
+    // 月を指定した集計
+    const month = today.slice(0, 7);
+    const a = await (await s.req(`/api/admin/analytics?month=${month}`, 'GET', null, staff)).json();
+    assert.equal(a.period.from, month + '-01');
+    assert.equal(a.period.to, today);
+    assert.equal((await s.req('/api/admin/closed/holidays', 'POST', { year: 2027 }, staff)).status, 403);
+    assert.equal((await (await s.req('/api/admin/closed/holidays', 'POST', { year: Number(today.slice(0, 4)) + 1 }, owner)).json()).added.length > 10, true);
+  } finally { s.close(); }
+});
+
+test('点検で見つかった問題の再発防止（安全性）', async () => {
+  const net = require('node:net');
+  const s = await boot({ adminPassword: 'secret-pass', trustProxy: true, limits: { login: 3 } });
+  try {
+    // 壊れたアドレスを送られても、サーバーは止まらない
+    const port = Number(new URL((await s.req('/healthz')).url).port);
+    const raw = await new Promise((resolve) => {
+      const sock = net.connect(port, '127.0.0.1', () => sock.write('GET // HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'));
+      let buf = '';
+      sock.on('data', (c) => { buf += c; });
+      sock.on('close', () => resolve(buf));
+    });
+    assert.match(raw, /^HTTP\/1\.1 400/);
+    assert.equal((await s.req('/healthz')).status, 200);
+
+    // X-Forwarded-For の左側を書きかえても、回数制限は逃れられない（右端＝プロキシが足した値で数える）
+    const codes = [];
+    for (let i = 0; i < 5; i++) {
+      codes.push((await s.req('/api/admin/login', 'POST', { loginId: 'admin', password: 'bad' }, { 'x-forwarded-for': `10.0.0.${i}, 203.0.113.9` })).status);
+    }
+    assert.deepEqual(codes, [401, 401, 401, 429, 429]);
+    // 成功したログインは回数に数えない
+    for (let i = 0; i < 5; i++) {
+      assert.equal((await s.req('/api/admin/login', 'POST', { loginId: 'admin', password: 'secret-pass' }, { 'x-forwarded-for': '198.51.100.7' })).status, 200);
+    }
+    // ログイン失敗は、操作履歴を埋めつくさないよう1行にまとめる
+    const cookie = (await s.req('/api/admin/login', 'POST', { loginId: 'admin', password: 'secret-pass' }, { 'x-forwarded-for': '198.51.100.7' })).headers.get('set-cookie').split(';')[0];
+    const audit = (await (await s.req('/api/admin/audit', 'GET', null, { cookie })).json()).audit;
+    assert.equal(audit.filter((a) => a.action === 'ログイン失敗').length, 1);
+    // CSV書き出しを連打しても、履歴は1分に1行
+    for (let i = 0; i < 3; i++) await s.req('/api/admin/export', 'GET', null, { cookie });
+    const after = (await (await s.req('/api/admin/audit', 'GET', null, { cookie })).json()).audit;
+    assert.equal(after.filter((a) => a.action === 'CSVを書き出し').length, 1);
+
+    // 合言葉に全角文字を入れても、エラー（500）にならず「見つかりません」になる
+    const today = core.nowJST().date;
+    const made = await (await s.req('/api/admin/bookings', 'POST', { serviceId: 'v1', staffId: 's1', date: core.addDays(today, 2), start: '21:00', customerName: '山田' }, { cookie })).json();
+    assert.equal((await s.req(`/api/public/booking?id=${made.id}&token=${encodeURIComponent('あ'.repeat(24))}`)).status, 404);
+    // 設定の形が壊れていても 500 にしない。存在しない権限は受け付けない
+    assert.equal((await s.req('/api/admin/config', 'PUT', { staff: [null], services: [] }, { cookie })).status, 400);
+    assert.equal((await s.req('/api/admin/users', 'POST', { name: 'x', loginId: 'xxx', password: 'long-enough-pw', role: 'constructor' }, { cookie })).status, 400);
+    // データファイルは、動かしている本人だけが読める
+    assert.equal(fs.statSync(s.dataFile).mode & 0o077, 0);
+  } finally { s.close(); }
+});
+
+test('お試し状態は同じ機械からだけ。予約ページの悪用（宣伝文の差し込み・枠の買い占め）を防ぐ', async () => {
+  const s = await boot({});
+  try {
+    assert.equal((await (await s.req('/api/admin/session')).json()).protected, false); // テストは 127.0.0.1 から
+    const today = core.nowJST().date;
+    const days = (await (await s.req(`/api/public/availability?from=${today}&to=${core.addDays(today, 20)}&serviceId=v1&staffId=s1`)).json()).days;
+    const date = Object.keys(days).sort().find((d) => d > today && days[d] > 5);
+    const { slots } = await (await s.req(`/api/public/slots?date=${date}&serviceId=v1&staffId=s1`)).json();
+    const post = (i, over) => s.req('/api/public/bookings', 'POST', Object.assign({ serviceId: 'v1', staffId: 's1', date, start: slots[i], customerName: '山田', email: 'victim@example.org' }, over));
+    assert.equal((await post(0, { customerName: 'FREE MONEY http://evil.example/x' })).status, 400);
+    assert.equal((await post(0, { email: 'a,b<c>@example.org' })).status, 400);
+    const ok = await (await post(0, { customerName: '山田\n■ 当選のお知らせ', note: '1行目\n2行目' })).json();
+    assert.equal(ok.customerName, '山田 ■ 当選のお知らせ'); // 名前の改行は空白になる
+    assert.equal((await post(1)).status, 201);
+    assert.equal((await post(2)).status, 201);
+    assert.equal((await post(3)).status, 409); // 同じメールアドレスでは3件まで
+    assert.equal((await post(3, { email: 'other@example.org' })).status, 201);
+  } finally { s.close(); }
 });

@@ -80,6 +80,27 @@ $('loginForm').addEventListener('submit', async (ev) => {
     $('loginError').hidden = false;
   }
 });
+// 自分のアカウント（パスワード変更・ログアウト）
+$('me').addEventListener('click', () => {
+  const u = state.config.user;
+  $('meName').textContent = `${u.name}（${ROLE[u.role]}）`;
+  $('pwForm').hidden = u.builtin;
+  $('pwBuiltin').hidden = !u.builtin;
+  $('pwForm').reset();
+  $('pwError').hidden = true;
+  $('meDialog').showModal();
+});
+$('pwForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  try {
+    await call('/api/admin/me/password', 'PUT', { current: ev.target.current.value, next: ev.target.next.value });
+    $('meDialog').close();
+    toast('パスワードを変更しました。');
+  } catch (e) {
+    $('pwError').textContent = e.message;
+    $('pwError').hidden = false;
+  }
+});
 $('logout').addEventListener('click', async () => {
   await call('/api/admin/logout', 'POST').catch(() => {});
   showLogin();
@@ -142,7 +163,9 @@ async function loadWeek() {
   const from = mondayOf(state.cursor);
   const to = addDays(from, 6);
   $('calRange').textContent = `${jp(from)}〜${jp(to)}`;
-  weekData = await call(`/api/admin/calendar?from=${from}&to=${to}`);
+  const data = await call(`/api/admin/calendar?from=${from}&to=${to}`);
+  if (from !== mondayOf(state.cursor)) return; // 待っている間に別の週へ移っていたら、この応答は捨てる
+  weekData = data;
   drawWeek();
 }
 // 同じ時間に重なる予定を、横に並べるための列（レーン）を割り振る
@@ -236,7 +259,7 @@ function drawWeek() {
       el('span', { className: 'd', textContent: String(Number(d.slice(8))) }), el('span', { className: 'cnt', textContent: w.closed ? '休' : w.active ? `${w.active}件` : '' }));
     sb.setAttribute('aria-pressed', String(d === state.cursor));
     sb.setAttribute('aria-label', `${jp(d)} 予約${w.active}件`);
-    sb.addEventListener('click', () => { state.cursor = d; drawWeek(); });
+    sb.addEventListener('click', () => { state.cursor = d; drawWeek(); focusDay(); });
     strip.push(sb);
   }
   $('weekHead').replaceChildren(...head);
@@ -244,6 +267,13 @@ function drawWeek() {
   $('strip').replaceChildren(...strip);
 }
 $('showCancelled').addEventListener('change', () => { if (weekData) drawWeek(); });
+// スマホでは1日ぶんが縦に長いので、選んだ日の最初の予定（なければ現在時刻）が見える位置まで動かす
+function focusDay() {
+  if (!window.matchMedia('(max-width: 760px)').matches) return;
+  const col = document.querySelector('#weekBody .tcol.sel');
+  const target = col && (col.querySelector('.ev') || col.querySelector('.nowline'));
+  if (target) target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
 async function loadMonth() {
   const first = state.cursor.slice(0, 8) + '01';
   const last = addDays(shiftMonth(first, 1), -1);
@@ -283,12 +313,27 @@ $('calStaff').addEventListener('change', guard((ev) => { state.staffFilter = ev.
 function summary(rows) {
   $('detailBody').replaceChildren(...rows.filter((r) => r[1]).flatMap(([k, v]) => [el('dt', { textContent: k }), el('dd', { textContent: v })]));
   $('detailExtra').hidden = true;
+  $('memoBox').hidden = true;
 }
 const SOURCE = { web: '予約ページ', admin: '管理画面', import: 'CSV読み込み', sample: 'サンプル' };
 function openBooking(b) {
   $('detailTitle').textContent = '予約の詳細';
   summary([['日時', `${jp(b.date)} ${b.start}〜${b.end}`], ['メニュー', serviceName(b.serviceId)], ['担当者', staffName(b.staffId)],
-    ['お名前', `${b.customerName} 様`], ['メール', b.email], ['電話', b.phone], ['相談内容', b.note], ['状態', STATUS[b.status]], ['登録元', SOURCE[b.source]]]);
+    ['お名前', `${b.customerName} 様`], ['メール', b.email], ['電話', b.phone], ['相談内容', b.note],
+    ...(b.answers || []).map((a) => [a.label, a.value]), ['状態', STATUS[b.status]], ['登録元', SOURCE[b.source]]]);
+  $('memoBox').hidden = false;
+  $('memoText').value = b.memo || '';
+  $('memoSaved').textContent = '';
+  $('memoBox').onsubmit = async (ev) => {
+    ev.preventDefault();
+    try {
+      await call(`/api/admin/bookings/${b.id}`, 'PATCH', { memo: $('memoText').value });
+      b.memo = $('memoText').value;
+      const inWeek = weekData && weekData.bookings.find((x) => x.id === b.id);
+      if (inWeek) inWeek.memo = b.memo;
+      $('memoSaved').textContent = '保存しました。';
+    } catch (e) { $('memoSaved').textContent = e.message; }
+  };
   const actions = Object.keys(STATUS).filter((s) => s !== b.status).map((s) => {
     const btn = el('button', { className: 'small' + (s === 'cancelled' ? ' danger' : ''), textContent: `「${STATUS[s]}」にする` });
     btn.addEventListener('click', guard(async () => {
@@ -443,7 +488,8 @@ function openCustomer(c) {
   $('detailExtra').hidden = false;
   $('detailExtra').replaceChildren(...c.history.map((h) => el('div', null,
     el('div', { className: 'row' }, el('strong', { textContent: `${jpFull(h.date)} ${h.start}` }), pill(h.status)),
-    el('div', { className: 'muted', textContent: `${h.serviceName}／${h.staffName}${h.note ? '／' + h.note : ''}` }))));
+    el('div', { className: 'muted', textContent: `${h.serviceName}／${h.staffName}${h.note ? '／' + h.note : ''}` }),
+    h.memo ? el('div', { style: 'white-space:pre-wrap', textContent: `メモ: ${h.memo}` }) : null)));
   $('detailActions').replaceChildren();
   $('detail').showModal();
 }
@@ -493,7 +539,9 @@ function delta(cur, prev, kind, hasPrev, upIsGood) {
 }
 let rulesInfo = null;
 async function loadAnalytics() {
-  const a = await call(`/api/admin/analytics?days=${$('days').value}`);
+  const v = $('days').value;
+  const a = await call(`/api/admin/analytics?${v.includes('-') ? 'month=' + v : 'days=' + v}`);
+  $('printHead').textContent = `${state.config.settings.site.name}　予約レポート（${a.period.from}〜${a.period.to}）`;
   const t = a.totals;
   const p = a.previous.totals;
   const has = p.total > 0;
@@ -547,6 +595,18 @@ async function loadAnalytics() {
   }));
 }
 $('days').addEventListener('change', guard(loadAnalytics));
+$('printReport').addEventListener('click', () => window.print());
+// 集計期間に「今月」「先月」などの月単位の選択肢を足す
+function addMonthOptions() {
+  if ($('days').querySelector('[data-month]')) return;
+  const first = state.config.today.slice(0, 8) + '01';
+  for (let i = 0; i < 4; i++) {
+    const m = shiftMonth(first, -i).slice(0, 7);
+    const o = el('option', { value: m, textContent: `${Number(m.slice(0, 4))}年${Number(m.slice(5))}月${i === 0 ? '（今月）' : i === 1 ? '（先月）' : ''}` });
+    o.dataset.month = '1';
+    $('days').append(o);
+  }
+}
 $('rulesSave').addEventListener('click', guard(async () => {
   const body = {};
   for (const m of rulesInfo) {
@@ -593,7 +653,8 @@ $('sampleDel').addEventListener('click', guard(async () => {
 
 // ---------- 設定 ----------
 let draft = null;
-const dirty = () => { $('saved').textContent = '変更があります。「設定を保存する」を押すと反映されます。'; };
+let isDirty = false; // 保存していない変更があるか
+const dirty = () => { isDirty = true; $('saved').textContent = '変更があります。「設定を保存する」を押すと反映されます。'; };
 async function loadSettings() {
   if (!draft) draft = JSON.parse(JSON.stringify(state.config));
   renderSettings();
@@ -617,6 +678,25 @@ function renderSettings() {
   $('setReminder').checked = st.mail.reminder;
   $('setReminderHour').replaceChildren(...Array.from({ length: 24 }, (_, h) => el('option', { value: h, textContent: `${h}時` })));
   $('setReminderHour').value = st.mail.reminderHour;
+  $('setNotify').value = st.mail.notifyTo || '';
+  // 事前アンケートの質問
+  st.questions = st.questions || [];
+  $('questionList').replaceChildren(...(st.questions.length ? st.questions.map((q, i) => {
+    const type = el('select', null, el('option', { value: 'text', textContent: '自由に入力' }), el('option', { value: 'select', textContent: '選択肢から選ぶ' }));
+    type.value = q.type;
+    type.addEventListener('change', () => { q.type = type.value; dirty(); renderSettings(); });
+    const required = el('input', { type: 'checkbox', checked: Boolean(q.required) });
+    required.addEventListener('change', () => { q.required = required.checked; dirty(); });
+    const opts = el('textarea', { value: (q.options || []).join('\n'), placeholder: '例:\n対面\nオンライン', style: 'min-height:84px' });
+    opts.addEventListener('input', () => { q.options = opts.value.split('\n').map((o) => o.trim()).filter(Boolean); dirty(); });
+    return el('div', { className: 'stack-s block-item' },
+      el('div', { className: 'row' },
+        el('label', { className: 'grow' }, '質問文', input({ value: q.label, maxLength: 80, placeholder: '例: ご希望の面談方法' }, (x) => { q.label = x.value; })),
+        el('label', { style: 'width:11em' }, '答え方', type),
+        el('div', { style: 'align-self:end' }, remove(st.questions, i, q.label || '質問'))),
+      q.type === 'select' ? el('label', null, '選択肢（1行に1つ）', opts) : null,
+      el('label', { className: 'check' }, required, '回答を必須にする'));
+  }) : [empty('質問はまだありません。')]));
   const mail = state.config.mail;
   $('mailStatus').className = 'msg ' + (mail.enabled ? 'ok' : 'info');
   $('mailStatus').textContent = mail.enabled
@@ -664,23 +744,30 @@ function renderSettings() {
     el('label', null, '説明（任意。予約ページに表示されます）', input({ value: v.description || '', maxLength: 200 }, (x) => { v.description = x.value; })))));
 }
 // 画面上部の入力欄は、入力のたびに下書きへ写す（担当者欄などを描き直しても、入力が消えないようにする）
+const numOrKeep = (id) => ($(id).value.trim() === '' ? '' : Number($(id).value)); // 空欄なら、いまの値のままにする
 function readTopFields() {
   Object.assign(draft.settings, {
-    slotMinutes: Number($('setSlot').value), windowDays: Number($('setWindow').value), minLeadMinutes: Number($('setLead').value),
-    site: { name: $('setName').value, intro: $('setIntro').value, cancelDeadlineHours: Number($('setDeadline').value) },
-    mail: { reminder: $('setReminder').checked, reminderHour: Number($('setReminderHour').value) },
+    slotMinutes: numOrKeep('setSlot'), windowDays: numOrKeep('setWindow'), minLeadMinutes: numOrKeep('setLead'),
+    site: { name: $('setName').value, intro: $('setIntro').value, cancelDeadlineHours: numOrKeep('setDeadline') },
+    mail: { reminder: $('setReminder').checked, reminderHour: Number($('setReminderHour').value), notifyTo: $('setNotify').value.trim() },
   });
 }
-['setName', 'setIntro', 'setDeadline', 'setSlot', 'setWindow', 'setLead', 'setReminder', 'setReminderHour']
+['setName', 'setIntro', 'setDeadline', 'setSlot', 'setWindow', 'setLead', 'setReminder', 'setReminderHour', 'setNotify']
   .forEach((id) => $(id).addEventListener('input', () => { readTopFields(); dirty(); }));
 $('staffAdd').addEventListener('click', () => {
   draft.staff.push({ id: '', name: '', hours: [null, 1, 1, 1, 1, 1, null].map((x) => (x ? { start: '09:00', end: '18:00' } : null)) });
+  dirty(); renderSettings();
+});
+$('questionAdd').addEventListener('click', () => {
+  if (draft.settings.questions.length >= 10) return toast('質問は10件までです。');
+  draft.settings.questions.push({ id: '', label: '', type: 'text', options: [], required: false });
   dirty(); renderSettings();
 });
 $('serviceAdd').addEventListener('click', () => { draft.services.push({ id: '', name: '', minutes: 60, description: '' }); dirty(); renderSettings(); });
 $('saveSettings').addEventListener('click', guard(async () => {
   readTopFields();
   await call('/api/admin/config', 'PUT', draft);
+  isDirty = false;
   await refreshConfig();
   draft = JSON.parse(JSON.stringify(state.config));
   renderSettings();
@@ -694,7 +781,19 @@ $('mailTest').addEventListener('submit', guard(async (ev) => {
 }));
 
 // 休業日（追加・削除はすぐに反映）
+$('holidayAdd').addEventListener('click', guard(async () => {
+  const r = await call('/api/admin/closed/holidays', 'POST', { year: Number($('holidayYear').value) });
+  $('holidayResult').hidden = false;
+  $('holidayResult').textContent = `${r.added.length}日を休業日に登録しました。` +
+    (r.skipped.length ? ` 登録しなかった日: ${r.skipped.map((h) => `${jp(h.date)} ${h.title}（${h.reason}）`).join('、')}` : '');
+  await refreshConfig();
+  await loadClosed();
+}));
 async function loadClosed() {
+  if (!$('holidayYear').options.length) {
+    const y = Number(state.config.today.slice(0, 4));
+    $('holidayYear').replaceChildren(...[y, y + 1].map((v) => el('option', { value: v, textContent: `${v}年` })));
+  }
   const list = state.config.closedDays.filter((c) => c.date >= state.config.today);
   $('closedList').replaceChildren(...(list.length ? list.map((c) => {
     const del = el('button', { className: 'small danger', textContent: '削除' });
@@ -762,10 +861,13 @@ async function loadAudit() {
 async function refreshConfig() {
   state.config = await call('/api/admin/config');
   $('openWarn').hidden = state.config.protected;
-  $('logout').hidden = !state.config.protected;
-  $('who').textContent = state.config.protected ? `${state.config.user.name}（${ROLE[state.config.user.role]}）` : '';
+  $('me').hidden = !state.config.protected;
+  $('who').textContent = state.config.user.name;
+  $('me').setAttribute('aria-label', `アカウント: ${state.config.user.name}`);
   $('calStaff').replaceChildren(el('option', { value: '', textContent: '全員の予定' }), ...options(state.config.staff));
+  if (!state.config.staff.some((x) => x.id === state.staffFilter)) state.staffFilter = '';
   $('calStaff').value = state.staffFilter;
+  if (!isDirty) draft = null; // 編集中でなければ、設定画面は最新の内容から作り直す
 }
 async function start() {
   const session = await call('/api/admin/session');
@@ -774,12 +876,15 @@ async function start() {
   $('app').hidden = false;
   await refreshConfig();
   buildNav();
+  addMonthOptions();
   if (!state.cursor) state.cursor = state.config.today;
   draft = null;
   openTab(state.tab);
   await loadNotes(true);
   clearInterval(state.timer);
   state.timer = setInterval(() => {
+    const jstToday = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo' }).format(new Date());
+    if (jstToday !== state.config.today) refreshConfig().then(() => { if (state.tab === 'calendar') loadCalendar(); }).catch(() => {});
     pollNotes();
     if (state.tab === 'calendar' && !document.querySelector('dialog[open]')) loadCalendar().catch(() => {});
   }, 15000);

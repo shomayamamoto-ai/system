@@ -1,0 +1,9 @@
+# HTTPS の証明書は Caddy が自動で取得・更新する。
+# 予約システムは接続元を X-Forwarded-For の先頭から読むため、
+# 外から送られてきた値は使わず、実際の接続元で上書きする。
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy app:3000 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}

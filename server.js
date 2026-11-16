@@ -11,7 +11,7 @@ const crypto = require('node:crypto');
 const core = require('./lib/core');
 const auth = require('./lib/auth');
 const { analyze, updateRules } = require('./lib/analytics');
-const { createMailer, buildMail, dueReminders } = require('./lib/mailer');
+const { createMailer, buildMail, buildStaffMail, dueReminders } = require('./lib/mailer');
 
 const { AppError } = core;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -37,6 +37,20 @@ function limiter(max, windowMs) {
     return h.count <= max;
   };
 }
+// 失敗だけを数える版: blocked() で止まっているかを調べ、fail() で失敗を1回ぶん数える
+function failLimiter(max, windowMs) {
+  const hits = new Map();
+  const live = (key) => { const h = hits.get(key); return h && h.reset >= Date.now() ? h : null; };
+  return {
+    blocked: (key) => { const h = live(key); return Boolean(h && h.count >= max); },
+    fail: (key) => {
+      if (hits.size > 5000) for (const [k, v] of hits) if (v.reset < Date.now()) hits.delete(k);
+      const h = live(key) || { count: 0, reset: Date.now() + windowMs };
+      h.count++;
+      hits.set(key, h);
+    },
+  };
+}
 
 function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, mailer } = {}) {
   const store = new core.Store(dataFile);
@@ -46,16 +60,38 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
   const L = Object.assign({ api: 300, booking: 10, login: 8 }, limits);
   const allowApi = limiter(L.api, 60 * 1000);              // 全API: 1分に300回まで
   const allowBooking = limiter(L.booking, 10 * 60 * 1000); // 予約・変更・キャンセル: 10分に10回まで
-  const allowLogin = limiter(L.login, 15 * 60 * 1000);     // ログイン: 15分に8回まで
+  const loginByIp = failLimiter(L.login, 15 * 60 * 1000);         // ログインの失敗: 同じ接続元から15分に8回まで
+  const loginById = failLimiter(L.loginId || 20, 15 * 60 * 1000); // 同じログインIDでの失敗: 15分に20回まで
+  const allowExportLog = limiter(1, 60 * 1000);            // 書き出しの履歴は、1人につき1分に1行まで
+  // ログイン失敗は1件ずつ残さず、10分ごとに回数をまとめて1行にする（履歴を失敗で埋めつくされないため）
+  let failRow = null;
+  let failUntil = 0;
+  function noteLoginFailure(d) {
+    if (!failRow || Date.now() > failUntil || !d.audit.includes(failRow)) {
+      auth.audit(d, null, 'ログイン失敗', '1回');
+      failRow = d.audit[d.audit.length - 1];
+      failRow.count = 1;
+      failUntil = Date.now() + 10 * 60 * 1000;
+    } else {
+      failRow.count++;
+      failRow.detail = `${failRow.count}回（10分間の合計）`;
+    }
+  }
 
   // パスワードもアカウントもなければ、だれでも開ける「お試し」の状態
-  const isProtected = () => Boolean(adminPassword) || db().users.length > 0;
+  // この状態を許すのは、サーバーと同じ機械から直接開いたときだけ。公開用の設定がある場合は許さない
+  const hasAccounts = () => Boolean(adminPassword) || db().users.length > 0;
+  const isLocal = (req) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+  const isProtected = (req) => hasAccounts() || httpsSite || !isLocal(req);
   const OPEN_USER = { id: 'open', name: '（ログインなし）', role: 'owner' };
 
-  const ipOf = (req) => (trustProxy && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || '';
-  const isHttps = (req) => Boolean(trustProxy && req.headers['x-forwarded-proto'] === 'https');
+  // X-Forwarded-For の左側は利用者が自由に書けるので使わない。手前のプロキシが足した「いちばん右」を接続元とみなす
+  const ipOf = (req) => (trustProxy && String(req.headers['x-forwarded-for'] || '').split(',').pop().trim()) || req.socket.remoteAddress || '';
+  const httpsSite = Boolean(trustProxy) || /^https:/i.test(publicUrl || ''); // プロキシの後ろ、または公開URLが https なら HTTPS 運用とみなす
+  const isHttps = () => httpsSite;
   const send = (res, status, body, headers) => {
-    res.writeHead(status, Object.assign({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }, SECURITY_HEADERS, headers));
+    res.writeHead(status, Object.assign({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }, SECURITY_HEADERS,
+      httpsSite ? { 'Strict-Transport-Security': 'max-age=15552000' } : null, headers));
     res.end(typeof body === 'string' ? body : JSON.stringify(body));
   };
   const readBody = (req) => new Promise((resolve, reject) => {
@@ -81,7 +117,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
   const sidOf = (req) => (/(?:^|;\s*)sid=([a-f0-9]{48})/.exec(req.headers.cookie || '') || [])[1];
   const cookie = (req, value, maxAge) => `sid=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${isHttps(req) ? '; Secure' : ''}`;
   const userOf = (req) => {
-    if (!isProtected()) return OPEN_USER;
+    if (!isProtected(req)) return OPEN_USER;
     const sid = sidOf(req);
     const s = sid && sessions.get(sid);
     if (!s) return null;
@@ -108,6 +144,11 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     }
   }
   const mailLater = (kind, b) => { sendMail(kind, b); }; // 応答を待たせないよう、送信は裏で行う
+  // お客様の操作（予約・変更・キャンセル）を、設定した通知先へメールで知らせる
+  const tellStaff = (kind, b) => {
+    if (!mail.enabled || !db().settings.mail.notifyTo) return;
+    mail.send(buildStaffMail(kind, db(), b, publicUrl)).catch((err) => console.error('担当者あてメールの送信に失敗:', err.message));
+  };
   async function runReminders(now = new Date()) {
     if (!mail.enabled) return 0;
     let sent = 0;
@@ -159,7 +200,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     // ----- お客様向け -----
     if (m === 'GET' && p === '/api/public/config') {
       return send(res, 200, {
-        site: d.settings.site,
+        site: d.settings.site, questions: d.settings.questions,
         services: d.services, staff: d.staff.map((s) => ({ id: s.id, name: s.name })),
         windowDays: d.settings.windowDays, today: core.nowJST().date,
       });
@@ -176,6 +217,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       const b = core.createBooking(d, await readBody(req));
       store.save();
       mailLater('confirm', b);
+      tellStaff('confirm', b);
       return send(res, 201, publicBooking(b));
     }
     if (m === 'GET' && p === '/api/public/booking') {
@@ -191,6 +233,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       const b = core.rescheduleByCustomer(d, body.id, body.token, body);
       store.save();
       mailLater('change', b);
+      tellStaff('change', b);
       return send(res, 200, publicBooking(b));
     }
     if (m === 'POST' && p === '/api/public/cancel') {
@@ -199,6 +242,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       const b = core.cancelByCustomer(d, body.id, body.token);
       store.save();
       mailLater('cancel', b);
+      tellStaff('cancel', b);
       return send(res, 200, publicBooking(b));
     }
 
@@ -207,15 +251,20 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
 
     if (m === 'GET' && p === '/api/admin/session') {
       const u = userOf(req);
-      return send(res, 200, { loggedIn: Boolean(u), protected: isProtected(), user: u && { name: u.name, role: u.role } });
+      return send(res, 200, { loggedIn: Boolean(u), protected: isProtected(req), user: u && { name: u.name, role: u.role } });
     }
     if (m === 'POST' && p === '/api/admin/login') {
-      if (!allowLogin(ip)) throw new AppError('ログインの失敗が続いたため、一時的に止めています。15分ほど待ってからお試しください。', 429);
+      if (loginByIp.blocked(ip)) throw new AppError('ログインの失敗が続いたため、一時的に止めています。15分ほど待ってからお試しください。', 429);
+      if (!hasAccounts()) throw new AppError('サーバーにパスワードが設定されていません。ADMIN_PASSWORD を設定して起動し直してください。', 503);
       const body = await readBody(req);
-      const user = auth.authenticate(d, body.loginId, body.password, adminPassword);
+      const loginId = core.clean(body.loginId, 30);
+      // 接続元を変えながらの総当たりに備えて、ログインIDごとにも回数を数える
+      if (loginById.blocked(loginId.toLowerCase())) throw new AppError('このログインIDでの失敗が続いたため、一時的に止めています。15分ほど待ってからお試しください。', 429);
+      const user = await auth.authenticate(d, body.loginId, body.password, adminPassword);
       if (!user) {
-        auth.audit(d, null, 'ログイン失敗', `ログインID: ${core.clean(body.loginId, 30)}`);
-        store.save();
+        loginByIp.fail(ip);
+        loginById.fail(loginId.toLowerCase());
+        noteLoginFailure(d);
         throw new AppError('ログインIDまたはパスワードが違います。', 401);
       }
       const sid = crypto.randomBytes(24).toString('hex');
@@ -237,7 +286,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     if (m === 'GET' && p === '/api/admin/config') {
       return send(res, 200, {
         settings: d.settings, staff: d.staff, services: d.services, closedDays: d.closedDays,
-        today: core.nowJST().date, protected: isProtected(), user: { name: me.name, role: me.role },
+        today: core.nowJST().date, protected: isProtected(req), user: { name: me.name, role: me.role, builtin: me.id === 'admin' || me.id === 'open' },
         mail: { enabled: mail.enabled, from: mail.from, hasPublicUrl: Boolean(publicUrl) },
       });
     }
@@ -273,10 +322,13 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     if (m === 'PATCH' && match) {
       const body = await readBody(req);
       let b;
-      if (body.status) {
+      if (typeof body.memo === 'string') {
+        b = core.setMemo(d, match[1], body.memo);
+        log('面談メモを保存', say(b));
+      } else if (body.status) {
         b = core.setBookingStatus(d, match[1], body.status);
         log('予約の状態を変更', `${say(b)} →「${{ booked: '予約済', completed: '完了', noshow: '無断キャンセル', cancelled: 'キャンセル' }[b.status]}」`);
-        if (b.status === 'cancelled') mailLater('cancel', b);
+        if (b.status === 'cancelled' && b.date >= core.nowJST().date) mailLater('cancel', b);
       } else {
         b = core.rescheduleBooking(d, match[1], body);
         log('予約の日時を変更', say(b));
@@ -290,8 +342,10 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     }
     if (m === 'GET' && p === '/api/admin/export') {
       const csv = core.exportCsv(d, optDate(q.get('from')), optDate(q.get('to')));
-      log('CSVを書き出し', `${q.get('from') || '最初'}〜${q.get('to') || '最後'}`);
-      store.save();
+      if (allowExportLog(me.id)) {
+        log('CSVを書き出し', `${q.get('from') || '最初'}〜${q.get('to') || '最後'}`);
+        store.save();
+      }
       return send(res, 200, csv, {
         'Content-Type': 'text/csv; charset=utf-8',
         'Content-Disposition': `attachment; filename="yoyaku-${core.nowJST().date}.csv"`,
@@ -319,6 +373,13 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       store.save();
       return send(res, 201, c);
     }
+    if (m === 'POST' && p === '/api/admin/closed/holidays') {
+      ownerOnly();
+      const r = core.addHolidays(d, (await readBody(req)).year);
+      log('祝日をまとめて登録', `追加 ${r.added.length}件／スキップ ${r.skipped.length}件`);
+      store.save();
+      return send(res, 200, r);
+    }
     match = /^\/api\/admin\/closed\/(\d{4}-\d{2}-\d{2})$/.exec(p);
     if (m === 'DELETE' && match) {
       ownerOnly();
@@ -336,8 +397,29 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       store.save();
       return send(res, 200, { ok: true });
     }
+    if (m === 'PUT' && p === '/api/admin/me/password') {
+      const body = await readBody(req);
+      auth.changeOwnPassword(d, me.id, body.current, body.next);
+      for (const [sid, s] of sessions) if (s.user.id === me.id && sid !== sidOf(req)) sessions.delete(sid); // ほかの端末のログインは切る
+      log('自分のパスワードを変更', '');
+      store.save();
+      return send(res, 200, { ok: true });
+    }
     if (m === 'GET' && p === '/api/admin/analytics') {
       const today = core.nowJST().date;
+      // month=YYYY-MM なら、その月の1日〜末日（今月なら今日まで）を集計する
+      const month = /^\d{4}-\d{2}$/.test(q.get('month') || '') && core.isDate(q.get('month') + '-01') ? q.get('month') : '';
+      if (month) {
+        const first = month + '-01';
+        const next = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 1)).toISOString().slice(0, 10);
+        const last = core.addDays(next, -1);
+        const to = last > today && first <= today ? today : last;
+        // 比べる相手は「前の月」。今月の途中なら、前の月の同じ日までと比べる
+        const prevFirst = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 2, 1)).toISOString().slice(0, 10);
+        const prevLast = core.addDays(first, -1);
+        const sameDay = core.addDays(prevFirst, core.diffDays(to, first));
+        return send(res, 200, analyze(d, first, to, new Date(), false, { from: prevFirst, to: to === last || sameDay > prevLast ? prevLast : sameDay }));
+      }
       const days = Math.min(730, Math.max(7, Number(q.get('days')) || 90));
       return send(res, 200, analyze(d, core.addDays(today, -(days - 1)), today));
     }
@@ -394,7 +476,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     match = /^\/api\/admin\/users\/([\w-]+)\/password$/.exec(p);
     if (m === 'PUT' && match) {
       const u = auth.resetPassword(d, match[1], (await readBody(req)).password);
-      for (const [sid, s] of sessions) if (s.user.id === u.id && s.user.id !== me.id) sessions.delete(sid);
+      for (const [sid, s] of sessions) if (s.user.id === u.id && sid !== sidOf(req)) sessions.delete(sid);
       log('パスワードを変更', `${u.name}（${u.loginId}）`);
       store.save();
       return send(res, 200, { ok: true });
@@ -405,7 +487,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     if (m === 'POST' && p === '/api/admin/mail/test') {
       if (!mail.enabled) throw new AppError('メール送信が設定されていません。README の「メールを送る設定」をご覧ください。');
       const to = core.clean((await readBody(req)).to, 120);
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) throw new AppError('メールアドレスの形式が正しくありません。');
+      if (!/^[^\s@,;<>"()]+@[^\s@,;<>"()]+\.[^\s@,;<>"()]+$/.test(to)) throw new AppError('メールアドレスの形式が正しくありません。');
       try {
         await mail.send({ to, subject: `【${d.settings.site.name}】テスト送信`, text: 'これはテスト送信です。このメールが届いていれば、メールの設定は正しく動いています。' });
       } catch (err) {
@@ -430,7 +512,17 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
   }
 
   const server = http.createServer((req, res) => {
-    const url = new URL(req.url, 'http://localhost');
+    let url;
+    try {
+      url = new URL(req.url, 'http://localhost');
+    } catch { // 「//」のような壊れたアドレスは、ここで受け止める（放っておくとサーバーごと止まる）
+      res.writeHead(400, Object.assign({ 'Content-Type': 'text/plain; charset=utf-8' }, SECURITY_HEADERS));
+      return res.end('リクエストの形式が正しくありません');
+    }
+    if (url.pathname === '/healthz') { // 監視用: サーバーが動いているかだけを返す
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end('ok');
+    }
     if (!url.pathname.startsWith('/api/')) {
       let pathname = '/__invalid__';
       try { pathname = decodeURIComponent(url.pathname); } catch { /* 壊れたURLは404にする */ }
@@ -469,6 +561,14 @@ if (require.main === module) {
     console.log(`メール送信:  ${server.mailEnabled ? '有効' : '未設定（SMTP_HOST と MAIL_FROM を設定すると有効になります）'}`);
     if (!adminPassword) console.log('注意: ADMIN_PASSWORD が未設定です。アカウントを作るまで、管理画面は誰でも開けます。');
   });
+  // 止める合図を受けたら、処理中の応答を終えてから終了する
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => {
+      console.log('サーバーを停止します。');
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 5000).unref();
+    });
+  }
 }
 
 module.exports = { createServer };

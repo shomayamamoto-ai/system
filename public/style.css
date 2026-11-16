@@ -404,3 +404,28 @@ dialog h2 { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
   dialog .row.end > * { flex: 1; }
 }
 .login button.primary { width: 100%; min-height: 50px; }
+
+.printonly { display: none; }
+#me { gap: 6px; }
+@media (max-width: 760px) { #me .long { display: none; } }
+
+/* ============================================================
+   印刷・PDF保存（分析レポート）
+   ============================================================ */
+@media print {
+  @page { margin: 14mm; }
+  :root { --bg: #fff; --shadow: none; }
+  body { background: #fff; font-size: 11pt; }
+  body.admin { padding: 0; }
+  header.top, nav.tabs, .fab, .toasts, .noprint, #rulesBox, #openWarn, #error, dialog { display: none !important; }
+  main > section:not(#tab-analytics) { display: none !important; }
+  .wrap { max-width: none; padding: 0; }
+  .printonly { display: block; font-family: var(--serif); font-size: 13pt; border-bottom: 1px solid #999; padding-bottom: 6px; }
+  .card { box-shadow: none; break-inside: avoid; }
+  .kpis { grid-template-columns: repeat(3, 1fr); }
+  .grid2 { grid-template-columns: repeat(2, 1fr); }
+  .trend { height: 150px; }
+  /* 背景色つきの棒やバッジも印刷されるようにする */
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
+.toolbar button { white-space: nowrap; }

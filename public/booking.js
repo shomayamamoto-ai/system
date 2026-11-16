@@ -217,7 +217,10 @@ $('customer').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   if (state.moving) return;
   const body = Object.fromEntries(new FormData(ev.target));
-  Object.assign(body, { serviceId: state.serviceId, staffId: state.staffId, date: state.date, start: state.start });
+  // 事前アンケートの回答は、質問ごとにまとめて送る
+  const answers = {};
+  for (const q of state.config.questions) { answers[q.id] = body['q_' + q.id] || ''; delete body['q_' + q.id]; }
+  Object.assign(body, { answers, serviceId: state.serviceId, staffId: state.staffId, date: state.date, start: state.start });
   $('submit').disabled = true;
   $('submit').textContent = '送信中…';
   try {
@@ -245,6 +248,14 @@ $('customer').addEventListener('submit', async (ev) => {
     if (q.get('id') && q.get('token')) {
       return showBooking(await call(`/api/public/booking?id=${encodeURIComponent(q.get('id'))}&token=${encodeURIComponent(q.get('token'))}`));
     }
+    // 事前アンケート（設定画面で追加した質問）の入力欄を作る
+    $('questions').replaceChildren(...state.config.questions.map((q) => {
+      const name = 'q_' + q.id;
+      const field = q.type === 'select'
+        ? el('select', { name, required: q.required }, el('option', { value: '', textContent: '選択してください' }), ...q.options.map((o) => el('option', { value: o, textContent: o })))
+        : el('input', { name, required: q.required, maxLength: 500 });
+      return el('label', null, `${q.label}（${q.required ? '必須' : '任意'}）`, field);
+    }));
     state.month = state.config.today.slice(0, 7);
     state.date = state.config.today;
     state.serviceId = state.config.services[0].id;

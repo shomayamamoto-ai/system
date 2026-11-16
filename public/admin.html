@@ -27,9 +27,8 @@
     <div class="row spread">
       <div class="brand"><span class="dot"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16v14H4zM4 10h16M8 3v4M16 3v4"/></svg></span>予約管理</div>
       <div class="row tools">
-        <span id="who" class="muted"></span>
         <a class="btn small" href="/" target="_blank" rel="noopener"><span class="long">お客様用の</span>予約ページ</a>
-        <button id="logout" class="small" hidden>ログアウト</button>
+        <button id="me" class="small" hidden><svg class="ic" viewBox="0 0 24 24" style="width:18px;height:18px"><path d="M5 20v-1a7 7 0 0 1 14 0v1M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8"/></svg><span id="who" class="long"></span></button>
       </div>
     </div>
     <nav class="tabs" id="tabs" aria-label="メニュー"></nav>
@@ -134,14 +133,18 @@
   <section id="tab-analytics" class="stack" hidden>
     <div class="page-title">
       <h2>分析・改善案</h2>
-      <select id="days" aria-label="集計期間" style="width:auto;margin:0">
-        <option value="30">直近30日</option>
-        <option value="90" selected>直近90日</option>
-        <option value="180">直近180日</option>
-        <option value="365">直近1年</option>
-      </select>
+      <div class="row noprint">
+        <select id="days" aria-label="集計期間" style="width:auto;margin:0">
+          <option value="30">直近30日</option>
+          <option value="90" selected>直近90日</option>
+          <option value="180">直近180日</option>
+          <option value="365">直近1年</option>
+        </select>
+        <button id="printReport">印刷・PDF保存</button>
+      </div>
     </div>
     <p id="periodNote" class="muted"></p>
+    <p id="printHead" class="printonly"></p>
     <div id="kpis" class="kpis"></div>
     <div class="card">
       <h3 id="trendTitle">予約件数の推移</h3>
@@ -227,6 +230,12 @@
       <div><button id="serviceAdd" class="small">メニューを追加</button></div>
     </div>
     <div class="card stack">
+      <h3>事前アンケート</h3>
+      <p class="muted">予約のときにお客様へ聞く質問を、10件まで追加できます。回答は、予約の詳細に表示されます。</p>
+      <div id="questionList" class="stack"></div>
+      <div><button id="questionAdd" class="small">質問を追加</button></div>
+    </div>
+    <div class="card stack">
       <h3>予約の受け付け方</h3>
       <div class="fields">
         <label>予約枠の刻み（分）<input id="setSlot" type="number" inputmode="numeric" min="5" max="120" step="5"></label>
@@ -241,6 +250,7 @@
       <label>リマインドを送る時刻（前日の何時以降か）
         <select id="setReminderHour"></select>
       </label>
+      <label>担当者への通知先（任意。お客様の予約・変更・キャンセルを、このアドレスへ知らせます）<input id="setNotify" type="email" inputmode="email" maxlength="120" placeholder="staff@example.com"></label>
       <form id="mailTest" class="row">
         <label class="grow">テスト送信のあて先<input name="to" type="email" inputmode="email" required placeholder="you@example.com"></label>
         <button type="submit" style="align-self:end">テスト送信</button>
@@ -255,6 +265,12 @@
       <h3>休業日</h3>
       <p class="muted">祝日・年末年始など、全員が予約を受けない日を登録します。追加・削除はすぐに反映されます。</p>
       <div id="closedList" class="rows"></div>
+      <div class="row">
+        <select id="holidayYear" aria-label="祝日を登録する年" style="width:auto;margin:0"></select>
+        <button id="holidayAdd" type="button">この年の祝日をまとめて登録</button>
+      </div>
+      <p class="muted">祝日は法律のルールから計算しています。春分の日・秋分の日は予測のため、登録後に一覧をご確認ください。</p>
+      <div id="holidayResult" class="msg info" hidden></div>
       <form id="closedForm" class="row">
         <label class="grow">日付<input name="date" type="date" required></label>
         <label class="grow">名前（任意）<input name="title" maxlength="40" placeholder="例: 年末年始"></label>
@@ -294,6 +310,10 @@
     <h2 id="detailTitle"></h2>
     <dl class="summary" id="detailBody"></dl>
     <div id="detailExtra" class="history" hidden></div>
+    <form id="memoBox" class="stack-s" hidden>
+      <label>面談メモ（お客様には表示されません）<textarea id="memoText" maxlength="2000" placeholder="面談の内容、次回までの宿題など"></textarea></label>
+      <div class="row"><button type="submit" class="small">メモを保存</button><span id="memoSaved" class="muted" aria-live="polite"></span></div>
+    </form>
     <div class="row" id="detailActions"></div>
     <div class="row end"><button data-close>閉じる</button></div>
   </div>
@@ -344,6 +364,23 @@
       <button type="button" data-close>やめる</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="meDialog">
+  <div class="stack">
+    <h2 id="meName"></h2>
+    <form id="pwForm" class="stack">
+      <label>いまのパスワード<input name="current" type="password" required autocomplete="current-password"></label>
+      <label>新しいパスワード（8文字以上）<input name="next" type="password" required minlength="8" autocomplete="new-password"></label>
+      <div id="pwError" class="msg error" role="alert" hidden></div>
+      <div><button type="submit">パスワードを変更する</button></div>
+    </form>
+    <p id="pwBuiltin" class="muted" hidden>このアカウントのパスワードは、サーバーの設定（ADMIN_PASSWORD）で変更します。</p>
+    <div class="row end">
+      <button id="logout" class="danger">ログアウト</button>
+      <button data-close>閉じる</button>
+    </div>
+  </div>
 </dialog>
 
 <dialog id="moreSheet">
