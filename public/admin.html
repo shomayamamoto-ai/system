@@ -2,19 +2,22 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d6b5f">
 <title>予約管理</title>
 <link rel="stylesheet" href="/style.css">
 </head>
-<body>
+<body class="admin">
 
 <!-- ログイン -->
 <main id="login" class="wrap" hidden>
   <form id="loginForm" class="card stack login">
     <h1>予約管理にログイン</h1>
+    <label>ログインID<input name="loginId" required autocomplete="username" autocapitalize="off" spellcheck="false"></label>
     <label>パスワード<input name="password" type="password" required autocomplete="current-password"></label>
     <div id="loginError" class="msg error" role="alert" hidden></div>
     <button class="primary" type="submit">ログイン</button>
+    <p class="muted">最初は、ログインID「admin」と、サーバーに設定したパスワード（ADMIN_PASSWORD）でログインします。</p>
   </form>
 </main>
 
@@ -22,28 +25,21 @@
 <header class="top">
   <div class="wrap">
     <div class="row spread">
-      <h1>予約管理</h1>
-      <div class="row">
-        <a class="btn small" href="/" target="_blank" rel="noopener">予約ページを開く</a>
+      <div class="brand"><span class="dot"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16v14H4zM4 10h16M8 3v4M16 3v4"/></svg></span>予約管理</div>
+      <div class="row tools">
+        <span id="who" class="muted"></span>
+        <a class="btn small" href="/" target="_blank" rel="noopener"><span class="long">お客様用の</span>予約ページ</a>
         <button id="logout" class="small" hidden>ログアウト</button>
       </div>
     </div>
-    <nav class="tabs" id="tabs">
-      <button data-tab="calendar" class="on">カレンダー</button>
-      <button data-tab="list">予約一覧</button>
-      <button data-tab="customers">顧客</button>
-      <button data-tab="notes">通知 <span id="unread" class="badge" hidden></span></button>
-      <button data-tab="analytics">分析・改善案</button>
-      <button data-tab="import">データ</button>
-      <button data-tab="settings">設定</button>
-    </nav>
+    <nav class="tabs" id="tabs" aria-label="メニュー"></nav>
   </div>
 </header>
 
 <main class="wrap stack">
   <div id="openWarn" class="msg warn" hidden>
-    管理画面にパスワードがかかっていません。インターネットに公開する前に、
-    環境変数 ADMIN_PASSWORD を設定してください。
+    いまは、だれでもこの管理画面を開ける状態です。
+    インターネットに公開する前に、「設定」→「ログイン用アカウント」でアカウントを作ってください。
   </div>
   <div id="error" class="msg error" role="alert" hidden></div>
 
@@ -61,24 +57,26 @@
           <button id="viewWeek" class="small on">週</button>
           <button id="viewMonth" class="small">月</button>
         </span>
-        <select id="calStaff" aria-label="担当者で絞り込む" style="width:auto;margin:0"></select>
-        <button id="addBooking" class="primary">予約を追加</button>
-        <button id="addBlock">予定を追加</button>
+        <select id="calStaff" aria-label="担当者で絞り込む" style="width:auto;margin:0;min-height:38px;padding:4px 10px"></select>
+        <button id="addBlock" class="small">予定を追加</button>
+        <button id="addBooking" class="small primary desk">予約を追加</button>
       </div>
     </div>
-    <p class="muted">「予定を追加」で入れた時間は、予約ページの空き枠から自動で外れます。予約や予定を押すと詳細を開けます。</p>
+    <div id="strip" class="strip"></div>
     <div id="week" class="week"></div>
     <div id="month" hidden>
       <div class="cal-head" aria-hidden="true"><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span><span>日</span></div>
       <div id="monthGrid" class="cal mcal"></div>
     </div>
+    <p class="muted">「予定を追加」で入れた時間と休業日は、予約ページの空き枠から自動で外れます。</p>
+    <button id="fab" class="fab primary" aria-label="予約を追加"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
   </section>
 
   <!-- 予約一覧 -->
   <section id="tab-list" class="stack" hidden>
     <h2>予約一覧</h2>
     <form id="listForm" class="card toolbar">
-      <label>キーワード<input name="q" placeholder="名前・メール・電話・相談内容"></label>
+      <label>キーワード<input name="q" type="search" placeholder="名前・メール・電話・相談内容" enterkeyhint="search"></label>
       <label>状態
         <select name="status">
           <option value="">すべて</option>
@@ -91,29 +89,29 @@
       <label>開始日<input name="from" type="date"></label>
       <label>終了日<input name="to" type="date"></label>
       <div class="row">
-        <button class="primary" type="submit">検索</button>
-        <button type="button" id="exportCsv">CSVで書き出す</button>
+        <button class="primary grow" type="submit">検索</button>
+        <button type="button" id="exportCsv">CSV書き出し</button>
       </div>
     </form>
     <p id="listCount" class="muted"></p>
-    <div class="card scroll"><table id="listTable"></table></div>
+    <div id="listRows" class="rows"></div>
   </section>
 
   <!-- 顧客 -->
   <section id="tab-customers" class="stack" hidden>
     <h2>顧客</h2>
-    <form id="custForm" class="card toolbar">
-      <label>キーワード<input name="q" placeholder="名前・メール・電話"></label>
-      <div class="row"><button class="primary" type="submit">検索</button></div>
+    <form id="custForm" class="card row">
+      <label class="grow">キーワード<input name="q" type="search" placeholder="名前・メール・電話" enterkeyhint="search"></label>
+      <button class="primary" type="submit" style="align-self:end">検索</button>
     </form>
     <p id="custCount" class="muted"></p>
-    <div class="card scroll"><table id="custTable"></table></div>
-    <p class="muted">メールアドレスが同じ予約を、同じお客様としてまとめています。行を押すと来談履歴を開けます。</p>
+    <div id="custRows" class="rows"></div>
+    <p class="muted">メールアドレスが同じ予約を、同じお客様としてまとめています。押すと来談履歴を開けます。</p>
   </section>
 
   <!-- 通知 -->
   <section id="tab-notes" class="stack" hidden>
-    <div class="row spread">
+    <div class="page-title">
       <h2>通知</h2>
       <button id="markRead" class="small">すべて既読にする</button>
     </div>
@@ -122,16 +120,14 @@
 
   <!-- 分析 -->
   <section id="tab-analytics" class="stack" hidden>
-    <div class="row spread">
+    <div class="page-title">
       <h2>分析・改善案</h2>
-      <label class="row" style="font-weight:400">集計期間
-        <select id="days" style="width:auto;margin:0">
-          <option value="30">直近30日</option>
-          <option value="90" selected>直近90日</option>
-          <option value="180">直近180日</option>
-          <option value="365">直近1年</option>
-        </select>
-      </label>
+      <select id="days" aria-label="集計期間" style="width:auto;margin:0">
+        <option value="30">直近30日</option>
+        <option value="90" selected>直近90日</option>
+        <option value="180">直近180日</option>
+        <option value="365">直近1年</option>
+      </select>
     </div>
     <p id="periodNote" class="muted"></p>
     <div id="kpis" class="kpis"></div>
@@ -148,7 +144,7 @@
       <div class="card"><h3>担当者別の稼働率</h3><p class="muted">担当者ごとの埋まり具合</p><div id="chartStaff" class="bars"></div></div>
       <div class="card"><h3>メニュー別の予約件数</h3><p class="muted">キャンセルを含む申し込み件数</p><div id="chartService" class="bars"></div></div>
     </div>
-    <details class="card">
+    <details class="card" id="rulesBox">
       <summary>改善案を出す目安の数値を変更する</summary>
       <div class="stack">
         <p class="muted">
@@ -176,11 +172,11 @@
       <pre>日付,開始,メニュー,担当者,氏名,メール,ステータス,受付日
 2026-10-01,10:00,初回相談（30分）,担当者A,山田 太郎,taro@example.com,完了,2026-09-25
 2026-10-02,14:00,個別面談（60分）,担当者B,佐藤 花子,hanako@example.com,キャンセル,2026-09-20</pre>
-      <p class="muted">ステータスは「予約済／完了／キャンセル／無断キャンセル」のいずれかです。文字コードは UTF-8 で保存してください。</p>
+      <p class="muted">ステータスは「予約済／完了／キャンセル／無断キャンセル」のいずれかです。文字コードは UTF-8 で保存してください。読み込んだ予約には、メールは送られません。</p>
       <input type="file" id="csvFile" accept=".csv,text/csv" aria-label="CSVファイル">
       <div><button id="csvRun" class="primary">読み込む</button></div>
       <div id="csvResult" class="msg ok" hidden></div>
-      <div id="csvSkipped" class="scroll" hidden></div>
+      <div id="csvSkipped" hidden></div>
     </div>
     <div class="card stack">
       <h3>すべての予約をCSVで書き出す</h3>
@@ -201,27 +197,81 @@
   <section id="tab-settings" class="stack" hidden>
     <h2>設定</h2>
     <div class="card stack">
+      <h3>予約ページの表示</h3>
+      <label>ページの名前（屋号・サービス名など）<input id="setName" maxlength="40"></label>
+      <label>案内文（任意。予約ページの最初に表示されます）<textarea id="setIntro" maxlength="400" placeholder="例: 初回のご相談は無料です。オンラインでの面談にも対応しています。"></textarea></label>
+      <label>お客様による変更・キャンセルの締切（面談の何時間前まで。0 で制限なし）<input id="setDeadline" type="number" inputmode="numeric" min="0" max="720"></label>
+    </div>
+    <div class="card stack">
       <h3>担当者と受付時間</h3>
-      <div class="scroll"><table id="staffTable"></table></div>
+      <p class="muted">曜日ごとに受付時間と休憩（昼休みなど）を設定できます。休憩の時間は、予約ページに表示されません。</p>
+      <div id="staffList" class="stack"></div>
       <div><button id="staffAdd" class="small">担当者を追加</button></div>
     </div>
     <div class="card stack">
       <h3>メニュー</h3>
-      <div class="scroll"><table id="serviceTable"></table></div>
+      <div id="serviceList" class="stack"></div>
       <div><button id="serviceAdd" class="small">メニューを追加</button></div>
     </div>
     <div class="card stack">
       <h3>予約の受け付け方</h3>
       <div class="fields">
-        <label>予約枠の刻み（分）<input id="setSlot" type="number" min="5" max="120" step="5"></label>
-        <label>何日先まで受け付けるか<input id="setWindow" type="number" min="1" max="365"></label>
-        <label>当日は何分前まで受け付けるか<input id="setLead" type="number" min="0" max="10080" step="15"></label>
+        <label>予約枠の刻み（分）<input id="setSlot" type="number" inputmode="numeric" min="5" max="120" step="5"></label>
+        <label>何日先まで受け付けるか<input id="setWindow" type="number" inputmode="numeric" min="1" max="365"></label>
+        <label>当日は何分前まで受け付けるか<input id="setLead" type="number" inputmode="numeric" min="0" max="10080" step="15"></label>
       </div>
     </div>
-    <div class="row">
-      <button id="saveSettings" class="primary">設定を保存する</button>
-      <span id="saved" class="muted" aria-live="polite"></span>
+    <div class="card stack">
+      <h3>お客様へのメール</h3>
+      <div id="mailStatus" class="msg info"></div>
+      <label class="check"><input id="setReminder" type="checkbox">面談の前日に、リマインドのメールを送る</label>
+      <label>リマインドを送る時刻（前日の何時以降か）
+        <select id="setReminderHour"></select>
+      </label>
+      <form id="mailTest" class="row">
+        <label class="grow">テスト送信のあて先<input name="to" type="email" inputmode="email" required placeholder="you@example.com"></label>
+        <button type="submit" style="align-self:end">テスト送信</button>
+      </form>
     </div>
+    <div class="savebar row spread">
+      <span id="saved" class="muted" aria-live="polite">ここまでの項目は、保存すると反映されます。</span>
+      <button id="saveSettings" class="primary">設定を保存する</button>
+    </div>
+
+    <div class="card stack">
+      <h3>休業日</h3>
+      <p class="muted">祝日・年末年始など、全員が予約を受けない日を登録します。追加・削除はすぐに反映されます。</p>
+      <div id="closedList" class="rows"></div>
+      <form id="closedForm" class="row">
+        <label class="grow">日付<input name="date" type="date" required></label>
+        <label class="grow">名前（任意）<input name="title" maxlength="40" placeholder="例: 年末年始"></label>
+        <button type="submit" style="align-self:end">追加</button>
+      </form>
+    </div>
+    <div class="card stack">
+      <h3>ログイン用アカウント</h3>
+      <p class="muted">
+        担当者ごとにアカウントを分けると、「だれが・いつ・何をしたか」が操作履歴に残ります。
+        「管理者」はすべての操作ができ、「担当者」は設定・データ・アカウントの変更ができません。
+      </p>
+      <div id="userList" class="rows"></div>
+      <form id="userForm" class="stack">
+        <div class="fields">
+          <label>名前<input name="name" required maxlength="40" placeholder="例: 山本"></label>
+          <label>ログインID（半角英数字）<input name="loginId" required minlength="3" maxlength="30" autocapitalize="off" spellcheck="false" autocomplete="off"></label>
+          <label>パスワード（8文字以上）<input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+          <label>権限<select name="role"><option value="staff">担当者</option><option value="owner">管理者</option></select></label>
+        </div>
+        <div><button type="submit">アカウントを追加</button></div>
+      </form>
+    </div>
+  </section>
+
+  <!-- 操作履歴 -->
+  <section id="tab-audit" class="stack" hidden>
+    <h2>操作履歴</h2>
+    <p id="auditCount" class="muted"></p>
+    <div id="auditRows" class="rows"></div>
   </section>
 </main>
 </div>
@@ -232,7 +282,7 @@
     <dl class="summary" id="detailBody"></dl>
     <div id="detailExtra" class="history" hidden></div>
     <div class="row" id="detailActions"></div>
-    <div><button id="detailClose">閉じる</button></div>
+    <div class="row end"><button data-close>閉じる</button></div>
   </div>
 </dialog>
 
@@ -246,16 +296,16 @@
       <label>日付<input name="date" type="date" required></label>
       <label>開始時刻<input name="start" type="time" required step="300"></label>
     </div>
-    <fieldset id="bkCustomer" class="stack" style="border:none;padding:0;margin:16px 0 0">
+    <fieldset id="bkCustomer" class="stack" style="border:none;padding:0;margin:16px 0 0;min-width:0">
       <label>お名前（必須）<input name="customerName" required maxlength="80"></label>
       <div class="fields">
-        <label>メール（任意）<input name="email" type="email" maxlength="120"></label>
-        <label>電話（任意）<input name="phone" type="tel" maxlength="30"></label>
+        <label>メール（任意）<input name="email" type="email" inputmode="email" maxlength="120"></label>
+        <label>電話（任意）<input name="phone" type="tel" inputmode="tel" maxlength="30"></label>
       </div>
       <label>相談内容・メモ（任意）<textarea name="note" maxlength="500"></textarea></label>
     </fieldset>
     <div id="bookingError" class="msg error" role="alert" hidden></div>
-    <div class="row">
+    <div class="row end">
       <button class="primary" type="submit" id="bookingSubmit">登録する</button>
       <button type="button" data-close>やめる</button>
     </div>
@@ -273,12 +323,22 @@
       <label>開始<input name="start" type="time" required value="12:00"></label>
       <label>終了<input name="end" type="time" required value="13:00"></label>
     </div>
+    <label class="check"><input name="repeat" type="checkbox" id="blockRepeat">この曜日に、毎週くり返す</label>
+    <label id="blockUntilWrap" hidden>くり返しの終了日（空欄なら、ずっと続けます）<input name="until" type="date"></label>
     <div id="blockError" class="msg error" role="alert" hidden></div>
-    <div class="row">
+    <div class="row end">
       <button class="primary" type="submit">追加する</button>
       <button type="button" data-close>やめる</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="moreSheet">
+  <div class="stack">
+    <h2>その他のメニュー</h2>
+    <div id="moreList" class="sheet-menu"></div>
+    <div class="row end"><button data-close>閉じる</button></div>
+  </div>
 </dialog>
 
 <div class="toasts" id="toasts" aria-live="polite"></div>

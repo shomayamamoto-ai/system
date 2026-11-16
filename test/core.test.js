@@ -203,3 +203,71 @@ test('分析: 前の期間との比較・推移・優先順位・目安の変更
   updateRules(db, { reset: true });
   assert.equal(db.settings.rules, undefined);
 });
+
+test('受付時間: 曜日ごとの時間・休憩・休業日・毎週の予定が空き枠に反映される', () => {
+  const db = fresh();
+  db.staff[0].hours[2] = { start: '10:00', end: '16:00', breakStart: '12:00', breakEnd: '13:00' }; // 火曜だけ短縮＋昼休み
+  const tue = core.freeSlots(db, { date: '2026-11-17', serviceId: 'v2', staffId: 's1' }, NOW).map((s) => s.start);
+  assert.equal(tue[0], '10:00');
+  assert.equal(tue.at(-1), '15:00');
+  for (const t of ['11:30', '12:00', '12:30']) assert.ok(!tue.includes(t), t); // 休憩にかかる枠は出ない
+  assert.ok(tue.includes('11:00') && tue.includes('13:00'));
+  // 休憩中でも、管理画面からなら登録できる
+  core.createBooking(db, { serviceId: 'v1', staffId: 's1', date: '2026-11-17', start: '12:00', customerName: '特別対応' }, NOW, { admin: true });
+
+  core.addBlock(db, { staffId: 's1', date: '2026-11-18', start: '09:00', end: '11:00', title: '定例会議', repeat: true, until: '2026-11-30' }, NOW);
+  const slotsOn = (date) => core.freeSlots(db, { date, serviceId: 'v2', staffId: 's1' }, NOW).map((s) => s.start);
+  assert.equal(slotsOn('2026-11-18')[0], '11:00');
+  assert.equal(slotsOn('2026-11-25')[0], '11:00');
+  assert.equal(slotsOn('2026-12-02')[0], '09:00'); // 終了日を過ぎたら元に戻る
+  assert.equal(core.expandRecurring(db, '2026-11-16', '2026-12-06').length, 2);
+
+  core.addClosedDay(db, { date: '2026-11-19', title: '臨時休業' });
+  assert.deepEqual(slotsOn('2026-11-19'), []);
+  assert.equal(core.availability(db, { from: '2026-11-19', to: '2026-11-19', serviceId: 'v1', staffId: 'any' }, NOW)['2026-11-19'], 0);
+  assert.throws(() => core.addClosedDay(db, { date: '2026-11-19' }), /すでに/);
+  book(db, { date: '2026-11-20' });
+  assert.throws(() => core.addClosedDay(db, { date: '2026-11-20' }), /予約が1件/);
+  book(db, { date: '2026-11-24', start: '14:00', customerName: '佐藤' });
+  assert.throws(() => core.addBlock(db, { staffId: 's1', date: '2026-11-17', start: '14:00', end: '15:00', repeat: true }, NOW), /重なります/);
+
+  // 分析の「受付可能時間」にも反映される
+  const { capacityMinutes } = require('../lib/analytics');
+  assert.equal(capacityMinutes(db, db.staff[0], '2026-11-17'), 5 * 60); // 6時間 − 休憩1時間
+  assert.equal(capacityMinutes(db, db.staff[0], '2026-11-18'), 7 * 60); // 9時間 − 毎週の予定2時間
+  assert.equal(capacityMinutes(db, db.staff[0], '2026-11-19'), 0);
+
+  assert.throws(() => core.updateConfig(db, { staff: [{ id: 's1', name: 'A', hours: [null, { start: '09:00', end: '18:00', breakStart: '08:00', breakEnd: '10:00' }] }], services: db.services }), /休憩時間/);
+});
+
+test('お客様による日時変更: 自分の枠は空きとして扱い、同じ担当者を優先する', () => {
+  const db = fresh();
+  const b = book(db); // 火曜 10:00〜11:00 担当者A
+  assert.throws(() => core.rescheduleByCustomer(db, b.id, 'x'.repeat(24), { date: '2026-11-17', start: '10:30' }, NOW), /見つかりません/);
+  core.rescheduleByCustomer(db, b.id, b.token, { date: '2026-11-17', start: '10:30' }, NOW); // 自分の枠と重なる時間へ
+  assert.deepEqual([b.start, b.end, b.staffId], [630, 690, 's1']);
+  core.addBlock(db, { staffId: 's1', date: '2026-11-18', start: '09:00', end: '18:00' }, NOW);
+  core.rescheduleByCustomer(db, b.id, b.token, { date: '2026-11-18', start: '11:00' }, NOW);
+  assert.equal(b.staffId, 's2'); // 担当者Aが埋まっている日は、空いている担当者に変わる
+  assert.throws(() => core.rescheduleByCustomer(db, b.id, b.token, { date: '2026-11-21', start: '11:00' }, NOW), /埋まっています/);
+  assert.equal(core.changeBlockedReason(db, b, new Date('2026-11-18T03:00:00Z')).includes('過ぎている'), true); // 開始後
+});
+
+test('前日リマインド: 設定の時刻以降に、明日の予約だけが対象になる', () => {
+  const { dueReminders, buildMail } = require('../lib/mailer');
+  const db = fresh();
+  const b = book(db); // 11/17（火）
+  b.createdAt = '2026-11-10T00:00:00.000Z';
+  const other = book(db, { date: '2026-11-18', start: '14:00', customerName: '佐藤' });
+  other.createdAt = '2026-11-10T00:00:00.000Z';
+  assert.deepEqual(dueReminders(db, new Date('2026-11-16T08:00:00Z')), []); // 日本時間17時: まだ早い
+  assert.deepEqual(dueReminders(db, new Date('2026-11-16T09:30:00Z')).map((x) => x.id), [b.id]); // 18時半
+  b.remindedAt = 'x';
+  assert.deepEqual(dueReminders(db, new Date('2026-11-16T09:30:00Z')), []);
+  delete b.remindedAt;
+  db.settings.mail.reminder = false;
+  assert.deepEqual(dueReminders(db, new Date('2026-11-16T09:30:00Z')), []);
+  const m = buildMail('remind', db, b, '');
+  assert.match(m.subject, /明日のご予約/);
+  assert.ok(!m.text.includes('http')); // 公開URLが未設定ならリンクは入れない
+});
