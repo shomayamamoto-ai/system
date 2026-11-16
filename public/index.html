@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>面談・相談のご予約</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top"><div class="wrap narrow"><h1>面談・相談のご予約</h1></div></header>
+<main class="wrap narrow stack">
+  <div id="error" class="msg error" role="alert" hidden></div>
+
+  <!-- 予約フォーム -->
+  <div id="form" class="stack steps">
+    <section class="card stack">
+      <h2>ご相談内容を選ぶ</h2>
+      <div id="services" class="choices"></div>
+    </section>
+    <section class="card stack">
+      <h2>担当者を選ぶ</h2>
+      <div id="staff" class="choices"></div>
+    </section>
+    <section class="card stack">
+      <h2>日時を選ぶ</h2>
+      <div class="row spread">
+        <button id="prev" type="button" class="small">← 前の週</button>
+        <span id="range" class="muted"></span>
+        <button id="next" type="button" class="small">次の週 →</button>
+      </div>
+      <div id="days" class="days"></div>
+      <div id="slots" class="slots"></div>
+      <p id="slotsNote" class="muted"></p>
+    </section>
+    <section class="card stack">
+      <h2>お客様情報を入力する</h2>
+      <form id="customer" class="stack">
+        <div class="fields">
+          <label>お名前（必須）<input name="customerName" required maxlength="80" autocomplete="name"></label>
+          <label>メールアドレス（必須）<input name="email" type="email" required maxlength="120" autocomplete="email"></label>
+          <label>電話番号<input name="phone" type="tel" maxlength="30" autocomplete="tel"></label>
+        </div>
+        <label>ご相談したい内容（任意）<textarea name="note" maxlength="500"></textarea></label>
+        <p id="picked" class="muted">日時を選ぶと、ここに予約内容が表示されます。</p>
+        <button class="primary" type="submit" id="submit" disabled>この内容で予約する</button>
+      </form>
+    </section>
+  </div>
+
+  <!-- 予約完了・予約確認 -->
+  <section id="done" class="card stack" hidden>
+    <h2 id="doneTitle">ご予約を受け付けました</h2>
+    <dl class="summary" id="doneSummary"></dl>
+    <p class="muted" id="doneNote">
+      下のリンクを保存しておくと、あとから予約の確認とキャンセルができます。
+    </p>
+    <input id="doneLink" readonly aria-label="予約確認用のリンク">
+    <div class="row">
+      <button id="cancel" type="button" class="danger">この予約をキャンセルする</button>
+      <a class="btn" href="/">新しく予約する</a>
+    </div>
+  </section>
+</main>
+<script src="/booking.js"></script>
+</body>
+</html>

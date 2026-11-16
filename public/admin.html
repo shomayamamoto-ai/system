@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>予約管理</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="row spread">
+      <h1>予約管理</h1>
+      <a class="btn small" href="/" target="_blank" rel="noopener">予約ページを開く</a>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button data-tab="calendar" class="on">カレンダー</button>
+      <button data-tab="notes">通知 <span id="unread" class="badge" hidden></span></button>
+      <button data-tab="analytics">分析・改善案</button>
+      <button data-tab="import">データ読み込み</button>
+      <button data-tab="settings">設定</button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap stack">
+  <div id="openWarn" class="msg warn" hidden>
+    管理画面にパスワードがかかっていません。インターネットに公開する前に、
+    環境変数 ADMIN_PASSWORD を設定してください。
+  </div>
+  <div id="error" class="msg error" role="alert" hidden></div>
+
+  <!-- カレンダー -->
+  <section id="tab-calendar" class="stack">
+    <div class="row spread">
+      <div class="row">
+        <button id="calPrev" class="small">← 前の週</button>
+        <button id="calToday" class="small">今週</button>
+        <button id="calNext" class="small">次の週 →</button>
+        <strong id="calRange"></strong>
+      </div>
+      <div class="row">
+        <select id="calStaff" aria-label="担当者で絞り込む" style="width:auto;margin:0"></select>
+        <button id="addBlock" class="primary">予定を追加</button>
+      </div>
+    </div>
+    <p class="muted">「予定を追加」で入れた時間は、予約ページの空き枠から自動で外れます。予約や予定を押すと詳細を開けます。</p>
+    <div id="week" class="week"></div>
+  </section>
+
+  <!-- 通知 -->
+  <section id="tab-notes" class="stack" hidden>
+    <div class="row spread">
+      <h2>通知</h2>
+      <button id="markRead" class="small">すべて既読にする</button>
+    </div>
+    <div id="notes" class="card"></div>
+  </section>
+
+  <!-- 分析 -->
+  <section id="tab-analytics" class="stack" hidden>
+    <div class="row spread">
+      <h2>分析・改善案</h2>
+      <label class="row" style="font-weight:400">集計期間
+        <select id="days" style="width:auto;margin:0">
+          <option value="30">直近30日</option>
+          <option value="90" selected>直近90日</option>
+          <option value="180">直近180日</option>
+          <option value="365">直近1年</option>
+        </select>
+      </label>
+    </div>
+    <div id="kpis" class="kpis"></div>
+    <h2>改善案</h2>
+    <div id="suggestions" class="stack"></div>
+    <p class="muted">
+      改善案は、あらかじめ決めた目安の数値と比べて自動で出しています（AIは使っていません）。
+      目安は初期値なので、lib/analytics.js の RULES で変更できます。
+    </p>
+    <div class="grid2">
+      <div class="card"><h3>曜日別の稼働率</h3><p class="muted">受付可能な時間のうち、予約で埋まった割合</p><div id="chartWeekday" class="bars"></div></div>
+      <div class="card"><h3>時間帯別の予約件数</h3><p class="muted">開始時刻ごとの件数（キャンセルを除く）</p><div id="chartHour" class="bars"></div></div>
+      <div class="card"><h3>担当者別の稼働率</h3><p class="muted">担当者ごとの埋まり具合</p><div id="chartStaff" class="bars"></div></div>
+      <div class="card"><h3>メニュー別の予約件数</h3><p class="muted">キャンセルを含む申し込み件数</p><div id="chartService" class="bars"></div></div>
+    </div>
+  </section>
+
+  <!-- データ読み込み -->
+  <section id="tab-import" class="stack" hidden>
+    <h2>データ読み込み</h2>
+    <div class="card stack">
+      <h3>過去の予約データ（CSV）を読み込む</h3>
+      <p class="muted">
+        1行目は見出しにしてください。「日付」「開始」は必須、ほかは空欄でも読み込めます。
+        読み込み結果は通知に届き、分析にすぐ反映されます。
+      </p>
+      <pre>日付,開始,メニュー,担当者,氏名,メール,ステータス,受付日
+2026-10-01,10:00,初回相談（30分）,担当者A,山田 太郎,taro@example.com,完了,2026-09-25
+2026-10-02,14:00,個別面談（60分）,担当者B,佐藤 花子,hanako@example.com,キャンセル,2026-09-20</pre>
+      <p class="muted">ステータスは「予約済／完了／キャンセル／無断キャンセル」のいずれかです。文字コードは UTF-8 で保存してください。</p>
+      <input type="file" id="csvFile" accept=".csv,text/csv">
+      <div><button id="csvRun" class="primary">読み込む</button></div>
+      <div id="csvResult" class="msg ok" hidden></div>
+      <div id="csvSkipped" class="scroll" hidden></div>
+    </div>
+    <div class="card stack">
+      <h3>サンプルデータで試す</h3>
+      <p class="muted">動作確認用に、架空の予約（過去90日〜2週間先）を登録します。あとからサンプルだけを削除できます。</p>
+      <div class="row">
+        <button id="sampleAdd">サンプルを登録する</button>
+        <button id="sampleDel" class="danger">サンプルを削除する</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 設定 -->
+  <section id="tab-settings" class="stack" hidden>
+    <h2>設定</h2>
+    <div class="card stack">
+      <h3>担当者と受付時間</h3>
+      <div class="scroll"><table id="staffTable"></table></div>
+      <div><button id="staffAdd" class="small">担当者を追加</button></div>
+    </div>
+    <div class="card stack">
+      <h3>メニュー</h3>
+      <div class="scroll"><table id="serviceTable"></table></div>
+      <div><button id="serviceAdd" class="small">メニューを追加</button></div>
+    </div>
+    <div class="card stack">
+      <h3>予約の受け付け方</h3>
+      <div class="fields">
+        <label>予約枠の刻み（分）<input id="setSlot" type="number" min="5" max="120" step="5"></label>
+        <label>何日先まで受け付けるか<input id="setWindow" type="number" min="1" max="365"></label>
+        <label>当日は何分前まで受け付けるか<input id="setLead" type="number" min="0" max="10080" step="15"></label>
+      </div>
+    </div>
+    <div class="row">
+      <button id="saveSettings" class="primary">設定を保存する</button>
+      <span id="saved" class="muted"></span>
+    </div>
+  </section>
+</main>
+
+<dialog id="detail">
+  <div class="stack">
+    <h2 id="detailTitle"></h2>
+    <dl class="summary" id="detailBody"></dl>
+    <div class="row" id="detailActions"></div>
+    <div><button id="detailClose">閉じる</button></div>
+  </div>
+</dialog>
+
+<dialog id="blockDialog">
+  <form id="blockForm" class="stack" method="dialog">
+    <h2>予定を追加</h2>
+    <p class="muted">会議・外出・休みなど、予約を受けられない時間を登録します。</p>
+    <label>担当者<select name="staffId" required></select></label>
+    <label>内容<input name="title" maxlength="60" placeholder="例: 社内会議"></label>
+    <div class="fields">
+      <label>日付<input name="date" type="date" required></label>
+      <label>開始<input name="start" type="time" required value="12:00"></label>
+      <label>終了<input name="end" type="time" required value="13:00"></label>
+    </div>
+    <div id="blockError" class="msg error" hidden></div>
+    <div class="row">
+      <button class="primary" type="submit">追加する</button>
+      <button type="button" id="blockCancel">やめる</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="/admin.js"></script>
+</body>
+</html>

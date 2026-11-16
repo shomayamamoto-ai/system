@@ -1,0 +1,12 @@
+{
+  "name": "mendan-yoyaku",
+  "version": "1.0.0",
+  "description": "面談・相談予約システム（スケジュール連動・通知・分析つき）",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": { "node": ">=18" }
+}
