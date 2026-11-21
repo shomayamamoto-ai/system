@@ -162,6 +162,18 @@
       <div class="card"><h3>担当者別の稼働率</h3><p class="muted">担当者ごとの埋まり具合</p><div id="chartStaff" class="bars"></div></div>
       <div class="card"><h3>メニュー別の予約件数</h3><p class="muted">キャンセルを含む申し込み件数</p><div id="chartService" class="bars"></div></div>
     </div>
+    <div class="card stack-s" id="loadCard">
+      <h3>予定のゆとり（待ち行列理論）</h3>
+      <p class="muted">担当者ごと・日ごとの稼働率（受付できる時間のうち、予約で埋まった割合）を見ています。</p>
+      <div id="loadSummary"></div>
+      <div class="scroll-x"><table id="loadTable" class="qtable"></table></div>
+      <p class="muted">
+        表は、稼働率ごとに「1件の遅れが、所要時間の何倍の遅れに広がりやすいか」の目安です（待ち行列理論の基本的なモデル M/M/1 による計算）。
+        レジで「1時間に60人さばけるところへ48人・54人・57人が来ると、待ち時間が約4分・9分・19分になる」のと同じ考え方です。
+        予約は時間が決まっているため、実際の遅れはこの式どおりにはなりません。8割を超えると急に悪化する、という傾向をつかむための目安としてご覧ください。
+      </p>
+      <div id="loadDays" class="rows"></div>
+    </div>
     <div class="card">
       <h3>曜日 × 時間帯の混み具合</h3>
       <p class="muted">開始時刻ごとの予約件数（キャンセルを除く）。色が濃いほど予約が多い時間帯です。</p>
@@ -250,7 +262,13 @@
         <label>何分前まで受け付けるか<input id="setLead" type="number" inputmode="numeric" min="0" max="10080" step="15"></label>
         <label>予約の前後に空ける準備時間（分。0 でなし）<input id="setBuffer" type="number" inputmode="numeric" min="0" max="120" step="5"></label>
         <label>担当者1人の1日の上限件数（0 で上限なし）<input id="setMaxPerDay" type="number" inputmode="numeric" min="0" max="50"></label>
+        <label>1日の予定の上限（稼働率%。100 で上限なし）<input id="setLoadCap" type="number" inputmode="numeric" min="50" max="100" step="5"></label>
       </div>
+      <p class="muted">
+        「1日の予定の上限」は、受付できる時間のうち予約で埋めてよい割合です。初期値は80%で、超える枠は予約ページに出しません。
+        待ち行列理論では、稼働率が8割を超えると、1件の延長や遅刻が後ろの予定へ急に広がりやすくなるためです。
+        管理画面からは上限を超えても登録できます（そのときはお知らせが出ます）。
+      </p>
     </div>
     <div class="card stack">
       <h3>お客様へのメール</h3>

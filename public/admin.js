@@ -48,11 +48,16 @@ function showError(message) {
 const guard = (fn) => async (...args) => {
   try { showError(''); await fn(...args); } catch (e) { showError(e.message); }
 };
-function toast(text) {
-  const t = el('div', { className: 'toast', textContent: text });
+// warn: 見落としてほしくない警告。長めに表示し、ふつうのお知らせより先には消さない
+function toast(text, warn) {
+  const t = el('div', { className: 'toast' + (warn ? ' warn' : ''), textContent: text });
+  t.setAttribute('role', warn ? 'alert' : 'status');
   $('toasts').append(t);
-  while ($('toasts').children.length > 2) $('toasts').firstChild.remove(); // 画面をふさがないよう2件まで
-  setTimeout(() => t.remove(), 6000);
+  while ($('toasts').children.length > 2) { // 画面をふさがないよう2件まで
+    const plain = [...$('toasts').children].find((x) => !x.classList.contains('warn') && x !== t);
+    (plain || $('toasts').firstChild).remove();
+  }
+  setTimeout(() => t.remove(), warn ? 15000 : 6000);
 }
 const empty = (text) => el('div', { className: 'empty', textContent: text });
 document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => b.closest('dialog').close()));
@@ -186,6 +191,29 @@ function layout(items) {
   if (group.length) close();
   return list;
 }
+// 表示中の担当者（絞り込み中ならその人、なければ全員）の、その日の稼働率。
+// 全員表示のときも、1人でも「8割」を超えた担当者がいれば印を付ける（平均にすると埋もれてしまうため）
+function loadOf(d) {
+  const per = (weekData.loads || {})[d] || {};
+  const limit = Math.min(weekData.loadCap || 80, 80) / 100 + 1e-9; // 設定の上限が8割より低ければ、その値
+  let booked = 0;
+  let capacity = 0;
+  let worst = null;
+  for (const [id, l] of Object.entries(per)) {
+    if (state.staffFilter && id !== state.staffFilter) continue;
+    booked += l.booked;
+    capacity += l.capacity;
+    const r = l.capacity ? l.booked / l.capacity : (l.booked ? 1 : 0);
+    if (!worst || r > worst.rate) worst = { id, rate: r };
+  }
+  if (!capacity) return null;
+  const rate = booked / capacity;
+  const over = Boolean(worst && worst.rate > limit);
+  const detail = Object.entries(per).filter(([id]) => !state.staffFilter || id === state.staffFilter)
+    .map(([id, l]) => `${staffName(id)} ${l.capacity ? Math.round((l.booked / l.capacity) * 100) : 0}%`).join('／');
+  return { booked, capacity, pct: Math.round(rate * 100), over, detail,
+    text: over && !state.staffFilter && Object.keys(per).length > 1 ? `${staffName(worst.id)} ${Math.round(worst.rate * 100)}%` : `稼働 ${Math.round(rate * 100)}%` };
+}
 function drawWeek() {
   const from = mondayOf(state.cursor);
   const toMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
@@ -219,8 +247,10 @@ function drawWeek() {
   for (const w of week) {
     const { d } = w;
     const isToday = d === state.config.today;
+    const ld = loadOf(d);
     head.push(el('div', { className: isToday ? 'today' : '' }, `${WD[wd(d)]}`, el('span', { className: 'd', textContent: String(Number(d.slice(8))) }),
-      w.closed ? el('span', { className: 'tag', textContent: w.closed.title }) : null));
+      w.closed ? el('span', { className: 'tag', textContent: w.closed.title }) : null,
+      !w.closed && ld ? el('span', { className: 'load' + (ld.over ? ' over' : ''), title: `稼働率（予約で埋まった時間の割合）: ${ld.detail}`, textContent: ld.text }) : null));
     const col = el('div', { className: 'tcol' + (w.closed ? ' closed' : '') + (d === state.cursor ? ' sel' : ''), style: `height:${height}px` });
     // 受付時間の外をうすく塗る（全員が休みの時間帯）
     if (!w.closed) {
@@ -256,7 +286,7 @@ function drawWeek() {
     cols.push(col);
     // スマホ用: 日付を選ぶボタン
     const sb = el('button', { className: isToday ? 'today' : '' }, el('small', { textContent: WD[wd(d)] }),
-      el('span', { className: 'd', textContent: String(Number(d.slice(8))) }), el('span', { className: 'cnt', textContent: w.closed ? '休' : w.active ? `${w.active}件` : '' }));
+      el('span', { className: 'd', textContent: String(Number(d.slice(8))) }), el('span', { className: 'cnt' + (loadOf(d) && loadOf(d).over ? ' over' : ''), textContent: w.closed ? '休' : w.active ? `${w.active}件` : '' }));
     sb.setAttribute('aria-pressed', String(d === state.cursor));
     sb.setAttribute('aria-label', `${jp(d)} 予約${w.active}件`);
     sb.addEventListener('click', () => { state.cursor = d; drawWeek(); focusDay(); });
@@ -423,9 +453,11 @@ $('bookingForm').addEventListener('submit', async (ev) => {
   const body = Object.fromEntries(new FormData(ev.target));
   try {
     if (editing) await call(`/api/admin/bookings/${editing.id}`, 'PATCH', body);
-    else await call('/api/admin/bookings', 'POST', body);
+    const made = editing ? null : await call('/api/admin/bookings', 'POST', body);
     $('bookingDialog').close();
-    toast(editing ? '日時を変更しました。' : '予約を登録しました。');
+    toast(editing ? '日時を変更しました。' : made.loadWarning
+      ? `予約を登録しました。この日の${staffName(made.staffId)}の稼働率が${made.loadWarning}%になり、8割を超えています。遅れが連鎖しやすいため、ほかの予約をずらせないか確認してください。`
+      : '予約を登録しました。', Boolean(made && made.loadWarning));
     if (state.tab === 'calendar') state.cursor = body.date;
     await refresh();
     pollNotes();
@@ -626,6 +658,20 @@ async function loadAnalytics() {
         return c;
       })]),
   ] : [el('p', { className: 'muted', textContent: 'データがありません。' })]));
+  // 予定のゆとり（待ち行列理論）
+  const L = a.load;
+  $('loadSummary').replaceChildren(el('p', null,
+    L.worked ? `予約のあった ${L.worked}日（担当者ごとに数えた日数）のうち、稼働率が${L.threshold}%を超えた日は ` : '',
+    L.worked ? el('strong', { textContent: `${L.over}日（${pct(L.over / L.worked)}）` }) : '対象期間に予約のあった日はありません。',
+    L.worked ? `です。予約のあった日の平均稼働率は ${pct(L.avgWorkedRate)}、予約ページの上限は ${L.cap >= 100 ? '設定なし' : L.cap + '%'} です。` : ''));
+  $('loadTable').replaceChildren(
+    el('tr', null, el('th', { textContent: '稼働率' }), ...L.table.map((r) => el('th', { className: r.rate > 0.8 ? 'hot' : '', textContent: pct(r.rate) }))),
+    el('tr', null, el('td', { textContent: '遅れの広がりやすさ' }), ...L.table.map((r) => el('td', { className: r.rate > 0.8 ? 'hot' : '', textContent: `約${r.factor}倍` }))));
+  $('loadDays').replaceChildren(...(L.overList.length ? L.overList.map((x) => el('div', { className: 'rowitem' },
+    el('span', { className: 'main', textContent: `${jpFull(x.date)}　${x.staff}` }),
+    el('span', { className: 'sub', textContent: `予約 ${Math.round(x.booked / 6) / 10}時間／受付できる時間 ${Math.round(x.capacity / 6) / 10}時間` }),
+    el('span', { className: 'side' }, el('span', { className: 'pill noshow', textContent: `稼働 ${pct(x.rate)}` })))) : []));
+  $('loadDays').hidden = !L.overList.length;
 
   // 目安の数値の入力欄（割合は % に直して表示する）
   $('rulesBox').hidden = !isOwner();
@@ -721,6 +767,7 @@ function renderSettings() {
   $('setLead').value = st.minLeadMinutes;
   $('setBuffer').value = st.bufferMinutes || 0;
   $('setMaxPerDay').value = st.maxPerDay || 0;
+  $('setLoadCap').value = st.loadCap == null ? 80 : st.loadCap;
   $('setReminder').checked = st.mail.reminder;
   $('setReminderHour').replaceChildren(...Array.from({ length: 24 }, (_, h) => el('option', { value: h, textContent: `${h}時` })));
   $('setReminderHour').value = st.mail.reminderHour;
@@ -809,12 +856,12 @@ const numOrKeep = (id) => ($(id).value.trim() === '' ? '' : Number($(id).value))
 function readTopFields() {
   Object.assign(draft.settings, {
     slotMinutes: numOrKeep('setSlot'), windowDays: numOrKeep('setWindow'), minLeadMinutes: numOrKeep('setLead'),
-    bufferMinutes: numOrKeep('setBuffer'), maxPerDay: numOrKeep('setMaxPerDay'),
+    bufferMinutes: numOrKeep('setBuffer'), maxPerDay: numOrKeep('setMaxPerDay'), loadCap: numOrKeep('setLoadCap'),
     site: { name: $('setName').value, intro: $('setIntro').value, cancelDeadlineHours: numOrKeep('setDeadline') },
     mail: { reminder: $('setReminder').checked, reminderHour: Number($('setReminderHour').value), notifyTo: $('setNotify').value.trim() },
   });
 }
-['setName', 'setIntro', 'setDeadline', 'setSlot', 'setWindow', 'setLead', 'setBuffer', 'setMaxPerDay', 'setReminder', 'setReminderHour', 'setNotify']
+['setName', 'setIntro', 'setDeadline', 'setSlot', 'setWindow', 'setLead', 'setBuffer', 'setMaxPerDay', 'setLoadCap', 'setReminder', 'setReminderHour', 'setNotify']
   .forEach((id) => $(id).addEventListener('input', () => { readTopFields(); dirty(); }));
 $('staffAdd').addEventListener('click', () => {
   draft.staff.push({ id: '', name: '', hours: [null, 1, 1, 1, 1, 1, null].map((x) => (x ? { start: '09:00', end: '18:00' } : null)) });

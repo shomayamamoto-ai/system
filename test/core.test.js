@@ -557,3 +557,78 @@ test('メールの精度: 送りそこねたリマインドは当日に送り直
   assert.equal(stillRelevant('cancel', b, morning), true);
   assert.equal(stillRelevant('cancel', b, new Date('2026-11-20T00:00:00Z')), false); // 日付を過ぎたら送らない
 });
+
+test('待ち行列理論: 計算が動画の数字（4分・9分・19分）と一致する', () => {
+  const { queueFactor } = require('../lib/stats');
+  // 1時間に60人さばけるレジ（1人1分）に、48人・54人・57人が来たときの平均待ち時間（分）
+  assert.equal(Math.round(queueFactor(48 / 60) * 1), 4);
+  assert.equal(Math.round(queueFactor(54 / 60) * 1), 9);
+  assert.equal(Math.round(queueFactor(57 / 60) * 1), 19);
+  assert.equal(queueFactor(0), 0);
+  assert.equal(queueFactor(1), Infinity);
+});
+
+test('待ち行列理論: 1日の予定は8割まで（超える枠は予約ページに出さない）', () => {
+  const db = fresh(); // 担当者A: 9:00〜18:00 ＝ 540分。8割は 432分
+  assert.equal(db.settings.loadCap, 80);
+  const slots = () => core.freeSlots(db, { date: '2026-11-17', serviceId: 'v2', staffId: 's1' }, NOW);
+  // 60分の面談を7件入れると 420分（約78%）。8件目（480分＝約89%）は受け付けない
+  for (const t of ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00']) book(db, { start: t, email: `${t.replace(':', '')}@example.com` });
+  assert.deepEqual(slots(), []);
+  assert.equal(Math.round(core.dayLoad(db, db.staff[0], '2026-11-17').rate * 100), 78);
+  // 30分の相談なら 450分（約83%）で、やはり超えるので出さない
+  assert.deepEqual(core.freeSlots(db, { date: '2026-11-17', serviceId: 'v1', staffId: 's1' }, NOW), []);
+  // 上限を100%（制限なし）にすると、空いている時間はまた出る
+  db.settings.loadCap = 100;
+  assert.deepEqual(slots().map((x) => x.start), ['16:00', '16:30', '17:00']);
+  // 管理画面からは、上限に関係なく登録できる
+  db.settings.loadCap = 80;
+  core.createBooking(db, { serviceId: 'v2', staffId: 's1', date: '2026-11-17', start: '16:00', customerName: '電話' }, NOW, { admin: true });
+  // 日時変更のときは、自分の予約ぶんを除いて判定する
+  db.bookings.pop(); // 管理画面の1件を取り消し、7件（420分）に戻す
+  const own = db.bookings[0];
+  const moves = core.freeSlots(db, { date: '2026-11-17', serviceId: 'v2', staffId: 's1', exceptBookingId: own.id }, NOW).map((x) => x.start);
+  assert.ok(moves.includes('09:00') && moves.includes('16:00')); // 自分を除くと360分なので、同じ日の中で動かせる
+  // 設定の範囲
+  core.updateConfig(db, { staff: db.staff, services: db.services, settings: { loadCap: 30 } });
+  assert.equal(db.settings.loadCap, 80); // 50〜100 以外は受け付けない
+  core.updateConfig(db, { staff: db.staff, services: db.services, settings: { loadCap: 90 } });
+  assert.equal(db.settings.loadCap, 90);
+});
+
+test('待ち行列理論: 「指名なし」は、その日の稼働率がいちばん低い担当者へ割り振る（混む人を避ける）', () => {
+  const db = fresh();
+  db.settings.loadCap = 100;
+  // 担当者A（540分）に 60分×2件、担当者B（10:00〜19:00＝540分）に 30分×3件（件数はBが多いが、稼働率はAが高い）
+  book(db, { start: '09:00', email: 'a1@example.com' });
+  book(db, { start: '11:00', email: 'a2@example.com' });
+  for (const t of ['10:00', '13:00', '15:00']) book(db, { staffId: 's2', serviceId: 'v1', start: t, email: `b${t.slice(0, 2)}@example.com` });
+  const b = book(db, { staffId: 'any', serviceId: 'v1', start: '16:00', email: 'new@example.com' });
+  assert.equal(b.staffId, 's2'); // 件数ではなく、埋まった時間の割合で選ぶ
+});
+
+test('待ち行列理論: 分析で、8割を超えた日を数えて改善案を出す', () => {
+  const db = fresh();
+  db.settings.loadCap = 100; // 上限なしで運用していた場合
+  const days = ['2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06'];
+  let csv = '日付,開始,メニュー,担当者,氏名,メール,ステータス\n';
+  days.forEach((d, i) => {
+    const n = i < 3 ? 8 : 4; // 3日は 8時間（約89%）、2日は 4時間（約44%）
+    for (let h = 0; h < n; h++) csv += `${d},${String(9 + h).padStart(2, '0')}:00,個別面談（60分）,担当者A,客${i}-${h},c${i}${h}@example.com,完了\n`;
+  });
+  core.importCsv(db, csv, NOW);
+  const a = analyze(db, '2026-11-02', '2026-11-08', NOW);
+  assert.equal(a.load.worked, 5);
+  assert.equal(a.load.over, 3);
+  assert.equal(a.load.overList[0].staff, '担当者A');
+  assert.equal(Math.round(a.load.overList[0].rate * 100), 89);
+  assert.deepEqual(a.load.table.map((r) => r.factor), [1, 2.3, 4, 9, 19]);
+  const s = a.suggestions.find((x) => x.title === '予定を詰め込みすぎている日があります');
+  assert.ok(s);
+  assert.equal(s.level, 'warn'); // 5日中3日（60%）
+  assert.match(s.action, /80%にすると/);
+  // 8割以内に収まっていれば出さない
+  const calm = fresh();
+  core.importCsv(calm, csv.split('\n').filter((l) => !/,1[4-6]:00,/.test(l)).join('\n'), NOW);
+  assert.equal(analyze(calm, '2026-11-02', '2026-11-08', NOW).load.over, 0);
+});

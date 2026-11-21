@@ -443,3 +443,16 @@ dialog h2 { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .heat .l2 { background: var(--accent-soft); background: color-mix(in srgb, var(--accent) 40%, var(--surface)); }
 .heat .l3 { background: var(--accent); background: color-mix(in srgb, var(--accent) 68%, var(--surface)); color: var(--accent-text); }
 .heat .l4 { background: var(--accent); color: var(--accent-text); font-weight: 700; }
+
+/* 稼働率（待ち行列理論の「8割」） */
+.thead .load { display: block; margin-top: 2px; font-size: .68rem; font-weight: 600; color: var(--muted); letter-spacing: .02em; }
+.thead .load.over { color: var(--bad); }
+.thead .load.over::before { content: "▲ "; }
+.strip .cnt.over { color: var(--bad); }
+.strip .cnt.over::after { content: " ▲"; }
+.strip button[aria-pressed="true"] .cnt.over { color: var(--accent-text); }
+.qtable { min-width: 420px; font-variant-numeric: tabular-nums; }
+.qtable th, .qtable td { text-align: center; }
+.qtable th:first-child, .qtable td:first-child { text-align: left; color: var(--muted); font-weight: 400; white-space: nowrap; }
+.qtable .hot { color: var(--bad); font-weight: 700; }
+.toast.warn { border-left-color: var(--bad); }

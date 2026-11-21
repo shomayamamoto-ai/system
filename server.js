@@ -336,6 +336,19 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
         bookings: d.bookings.filter((b) => b.date >= from && b.date <= to).map(adminBooking),
         blocks: d.blocks.filter((k) => k.date >= from && k.date <= to).concat(core.expandRecurring(d, from, to)).map(hm),
         closedDays: d.closedDays.filter((c) => c.date >= from && c.date <= to),
+        // 日ごと・担当者ごとの稼働率（カレンダーで「8割」を超えた日を目立たせるため）
+        loads: (() => {
+          const out = {};
+          for (let day = from; day <= to; day = core.addDays(day, 1)) {
+            out[day] = {};
+            for (const st of d.staff) {
+              const l = core.dayLoad(d, st, day);
+              if (l.capacity || l.booked) out[day][st.id] = { booked: l.booked, capacity: l.capacity };
+            }
+          }
+          return out;
+        })(),
+        loadCap: d.settings.loadCap == null ? 80 : d.settings.loadCap,
       });
     }
     if (m === 'GET' && p === '/api/admin/bookings') {
@@ -345,9 +358,13 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     if (m === 'POST' && p === '/api/admin/bookings') {
       const b = core.createBooking(d, await readBody(req), new Date(), { admin: true });
       log('予約を追加', say(b));
+      // 管理画面からは上限を超えても登録できる。そのかわり、超えたことを知らせる
+      const l = core.dayLoad(d, core.findStaff(d, b.staffId), b.date);
+      const capNow = d.settings.loadCap == null ? 80 : d.settings.loadCap;
+      const loadWarning = l.capacity && l.booked / l.capacity > Math.min(capNow, 80) / 100 ? Math.round((l.booked / l.capacity) * 100) : undefined;
       store.save();
       mailLater('confirm', b);
-      return send(res, 201, adminBooking(b));
+      return send(res, 201, Object.assign(adminBooking(b), { loadWarning }));
     }
     match = /^\/api\/admin\/bookings\/([\w-]+)$/.exec(p);
     if (m === 'PATCH' && match) {
