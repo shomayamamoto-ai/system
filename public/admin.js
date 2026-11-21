@@ -267,7 +267,7 @@ function drawWeek() {
       const isBooking = x.kind === 'booking';
       const btn = el('button', { className: 'ev ' + (isBooking ? x.status : 'block') + (it.e - it.s <= 30 ? ' short' : ''),
         style: `top:${y(it.s)}px;height:${Math.max(22, ((it.e - it.s) / 60) * hh - 1)}px;left:calc(${(it.lane / it.lanes) * 100}% + 2px);width:calc(${100 / it.lanes}% - 4px)` },
-        el('b', { textContent: `${x.start} ${isBooking ? x.customerName : (x.recurring ? '毎週・' : '') + x.title}` }),
+        el('b', { textContent: `${isBooking && x.risk && x.risk.level === 'high' ? '⚠ ' : ''}${x.start} ${isBooking ? x.customerName : (x.recurring ? '毎週・' : '') + x.title}` }),
         el('span', { textContent: `${isBooking ? serviceName(x.serviceId) + '／' : ''}${staffName(x.staffId)}` }));
       btn.title = `${x.start}〜${x.end} ${isBooking ? x.customerName + ' 様／' + STATUS[x.status] : x.title}／${staffName(x.staffId)}`;
       btn.addEventListener('click', (ev) => { ev.stopPropagation(); (isBooking ? openBooking(x) : openBlock(x)); });
@@ -349,12 +349,14 @@ function summary(rows) {
   $('actualBox').hidden = true;
   $('mailBox').hidden = true;
 }
+const RISK = { high: '高い（要確認）', mid: 'やや高い', low: '低い' };
 const SOURCE = { web: '予約ページ', admin: '管理画面', import: 'CSV読み込み', sample: 'サンプル' };
 function openBooking(b) {
   $('detailTitle').textContent = '予約の詳細';
   summary([['日時', `${jp(b.date)} ${b.start}〜${b.end}`], ['メニュー', serviceName(b.serviceId)], ['担当者', staffName(b.staffId)],
     ['お名前', `${b.customerName} 様`], ['メール', b.email], ['電話', b.phone], ['相談内容', b.note],
-    ...(b.answers || []).map((a) => [a.label, a.value]), ['状態', STATUS[b.status]], ['登録元', SOURCE[b.source]]]);
+    ...(b.answers || []).map((a) => [a.label, a.value]), ['状態', STATUS[b.status]], ['登録元', SOURCE[b.source]],
+    ['キャンセルの起きやすさ', b.risk ? `${RISK[b.risk.level]}（約${Math.round(b.risk.p * 100)}%）${b.risk.reasons.length ? '・' + b.risk.reasons.join('、') : ''}` : '']]);
   // 実際の面談時間
   const hhmm = (m) => (m == null ? '' : `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`);
   const nowHM = () => new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date());
@@ -668,7 +670,32 @@ async function loadForecast() {
       el('td', { textContent: d.enough ? pct(d.load) : '—' }),
       el('td', null, tag(d)))));
 }
+// キャンセルになりやすい予約（これから2週間）
+async function loadRisk() {
+  const r = await call('/api/admin/risk');
+  if (!r.ready) {
+    $('riskSummary').replaceChildren(el('p', { className: 'muted', textContent: `予測を作るには、結果の出た予約（完了・キャンセル・無断キャンセル）が${r.needed}件以上必要です（いまは${r.have}件）。` }));
+    return $('riskRows').replaceChildren();
+  }
+  const c = r.check;
+  const power = c && c.auc != null ? c.auc : null;
+  $('riskSummary').replaceChildren(el('p', null,
+    `これまでの予約 ${r.trained}件のうち、${pct(r.bad / r.trained)}がキャンセル・無断キャンセルでした。`,
+    power == null ? ' 見分ける力を確かめるには、直近30日の結果がもう少し必要です。'
+      : el('span', null, ' 見分ける力は ', el('strong', { textContent: power.toFixed(2) }),
+        power >= 0.6 ? `です（直近30日で「要確認」とした予約は、${c.highCount ? `実際に ${pct(c.highRate)} がキャンセル・無断キャンセルになりました。それ以外は ${pct(c.restRate)}` : '該当がありませんでした'}）。`
+          : 'で、まだ当てずっぽうと大きく変わりません。印は付けず、目安として並べています。')));
+  const list = r.upcoming.filter((x) => x.level !== 'low').slice(0, 10);
+  $('riskRows').replaceChildren(...(list.length ? list.map((x) => {
+    const row = el('div', { className: 'rowitem' },
+      el('span', { className: 'main', textContent: `${jpFull(x.date)} ${x.start}　${x.customerName} 様` }),
+      el('span', { className: 'sub', textContent: x.reasons.length ? x.reasons.join('、') : '目立つ理由はありません' }),
+      el('span', { className: 'side' }, el('span', { className: 'pill' + (x.level === 'high' && r.reliable ? ' noshow' : ' plain'), textContent: `約${Math.round(x.p * 100)}%` })));
+    return row;
+  }) : [empty('これから2週間に、起きやすさが高めの予約はありません。')]));
+}
 async function loadAnalytics() {
+  loadRisk().catch((e) => { $('riskSummary').textContent = e.message; });
   loadForecast().catch((e) => { $('fcSummary').textContent = e.message; });
   const v = $('days').value;
   const a = await call(`/api/admin/analytics?${v.includes('-') ? 'month=' + v : 'days=' + v}`);
@@ -855,6 +882,7 @@ function renderSettings() {
   $('setReminderHour').replaceChildren(...Array.from({ length: 24 }, (_, h) => el('option', { value: h, textContent: `${h}時` })));
   $('setReminderHour').value = st.mail.reminderHour;
   $('setNotify').value = st.mail.notifyTo || '';
+  $('setRiskConfirm').checked = Boolean(st.mail.riskConfirm);
   // 事前アンケートの質問
   st.questions = st.questions || [];
   $('questionList').replaceChildren(...(st.questions.length ? st.questions.map((q, i) => {
@@ -955,10 +983,10 @@ function readTopFields() {
     slotMinutes: numOrKeep('setSlot'), windowDays: numOrKeep('setWindow'), minLeadMinutes: numOrKeep('setLead'),
     bufferMinutes: numOrKeep('setBuffer'), maxPerDay: numOrKeep('setMaxPerDay'), loadCap: numOrKeep('setLoadCap'),
     site: { name: $('setName').value, intro: $('setIntro').value, cancelDeadlineHours: numOrKeep('setDeadline') },
-    mail: { reminder: $('setReminder').checked, reminderHour: Number($('setReminderHour').value), notifyTo: $('setNotify').value.trim() },
+    mail: { reminder: $('setReminder').checked, reminderHour: Number($('setReminderHour').value), notifyTo: $('setNotify').value.trim(), riskConfirm: $('setRiskConfirm').checked },
   });
 }
-['setName', 'setIntro', 'setDeadline', 'setSlot', 'setWindow', 'setLead', 'setBuffer', 'setMaxPerDay', 'setLoadCap', 'setReminder', 'setReminderHour', 'setNotify']
+['setName', 'setIntro', 'setDeadline', 'setSlot', 'setWindow', 'setLead', 'setBuffer', 'setMaxPerDay', 'setLoadCap', 'setReminder', 'setReminderHour', 'setNotify', 'setRiskConfirm']
   .forEach((id) => $(id).addEventListener('input', () => { readTopFields(); dirty(); }));
 $('staffAdd').addEventListener('click', () => {
   draft.staff.push({ id: '', name: '', hours: [null, 1, 1, 1, 1, 1, null].map((x) => (x ? { start: '09:00', end: '18:00' } : null)) });

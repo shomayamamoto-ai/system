@@ -867,3 +867,51 @@ test('予約数の予測: 入り方（ペース）を使うと、近い日の見
   assert.equal(wed.expected, 9); // 3日前より近い日は、ほぼ出そろっているので、入っている件数をそのまま見込む
   assert.ok(wed.high - wed.low <= 2); // 幅も狭い
 });
+
+test('キャンセルの起きやすさ: 傾向のあるデータでは、よく見分けられる', () => {
+  const { riskModel, auc } = require('../lib/risk');
+  assert.equal(auc([{ p: 0.9, bad: true }, { p: 0.1, bad: false }]), 1);
+  assert.equal(auc([{ p: 0.5, bad: true }, { p: 0.5, bad: false }]), 0.5);
+  const db = fresh();
+  assert.equal(riskModel(db, NOW).ready, false); // データがないうちは予測しない
+  let seed = 7;
+  const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  let n = 0;
+  const people = Array.from({ length: 80 }, (_, i) => ({ email: `p${i}@example.com`, flaky: i < 15 }));
+  for (let d = -120; d < 0; d++) {
+    const date = core.addDays('2026-11-16', d);
+    for (let k = 0; k < 3; k++) {
+      const who = people[Math.floor(rand() * people.length)];
+      const lead = rand() < 0.3 ? 14 + Math.floor(rand() * 10) : Math.floor(rand() * 7);
+      const pBad = (lead >= 14 ? 0.6 : 0.1) + (who.flaky ? 0.25 : 0);
+      db.bookings.push({ id: 'b' + n++, token: 't', serviceId: 'v1', staffId: 's1', date, start: 600 + k * 60, end: 630 + k * 60,
+        customerName: who.email, email: who.email, status: rand() < pBad ? 'cancelled' : 'completed', source: 'web',
+        createdAt: core.addDays(date, -lead) + 'T01:00:00.000Z' });
+    }
+  }
+  // これからの予約: 20日前に申し込んだ人（起きやすい）と、前日に申し込んだ人（起きにくい）
+  db.bookings.push({ id: 'far', token: 't', serviceId: 'v1', staffId: 's1', date: '2026-11-20', start: 600, end: 630, customerName: '新規A', email: 'new-a@example.com', status: 'booked', source: 'web', createdAt: '2026-10-31T01:00:00.000Z' });
+  db.bookings.push({ id: 'near', token: 't', serviceId: 'v1', staffId: 's1', date: '2026-11-20', start: 660, end: 690, customerName: '新規B', email: 'new-b@example.com', status: 'booked', source: 'web', createdAt: '2026-11-15T01:00:00.000Z' });
+  const r = riskModel(db, NOW);
+  assert.equal(r.ready, true);
+  assert.ok(r.check.auc > 0.75, `見分ける力 ${r.check.auc}`);
+  assert.ok(r.check.highRate > r.check.restRate * 2);
+  const far = r.upcoming.find((x) => x.id === 'far');
+  const near = r.upcoming.find((x) => x.id === 'near');
+  assert.ok(far.p > near.p * 2);
+  assert.equal(far.level, 'high');
+  assert.ok(far.reasons.includes('申し込みから面談まで14日以上'));
+});
+
+test('キャンセルの起きやすさ: 申し込みの時点で分かっていた履歴だけを使う（あとから分かることは使わない）', () => {
+  const { featuresOf } = require('../lib/risk');
+  const mk = (id, date, createdAt, status) => ({ id, token: 't', serviceId: 'v1', staffId: 's1', date, start: 600, end: 630, customerName: '山田', email: 'y@example.com', status, source: 'web', createdAt });
+  const a = mk('a', '2026-11-10', '2026-11-01T01:00:00.000Z', 'noshow');    // 11/10 に無断キャンセル
+  const b = mk('b', '2026-11-12', '2026-11-05T01:00:00.000Z', 'completed'); // 申し込みは 11/5（まだ a の結果は分からない）
+  const c = mk('c', '2026-11-20', '2026-11-11T01:00:00.000Z', 'booked');    // 申し込みは 11/11（a の無断キャンセルは分かっている）
+  const f = featuresOf([a, b, c]);
+  assert.equal(f.get(a).visit, 'first');
+  assert.deepEqual([f.get(b).visit, f.get(b).history], ['repeat', 'clean']);
+  assert.deepEqual([f.get(c).visit, f.get(c).history], ['repeat', 'hadBad']);
+  assert.equal(f.get(c).lead, '7-13');
+});

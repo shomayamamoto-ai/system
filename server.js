@@ -13,6 +13,7 @@ const auth = require('./lib/auth');
 const { analyze, updateRules } = require('./lib/analytics');
 const { forecast } = require('./lib/forecast');
 const wl = require('./lib/waitlist');
+const { riskModel } = require('./lib/risk');
 const { createMailer, buildMail, buildStaffMail, dueReminders, dueCatchUp, stillRelevant } = require('./lib/mailer');
 
 const { AppError } = core;
@@ -196,6 +197,17 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
   }
   const kickWaitlist = () => { setImmediate(() => checkWaitlist().catch((e) => console.error(e))); };
 
+  // キャンセルの起きやすさの予測（計算が重めなので、1分間は結果を使い回す）
+  let riskCache = null;
+  function risk(now = new Date()) {
+    if (riskCache && Date.now() - riskCache.at < 60000 && riskCache.size === db().bookings.length) return riskCache.value;
+    const value = riskModel(db(), now);
+    // 古いデータで作った予測が、新しいデータで「当てずっぽう」より十分よく当たったときだけ、印を付けてよいとみなす
+    value.reliable = Boolean(value.ready && value.check && value.check.auc != null && value.check.auc >= 0.6);
+    riskCache = { at: Date.now(), size: db().bookings.length, value };
+    return value;
+  }
+
   async function runReminders(now = new Date()) {
     if (!mail.enabled) return 0;
     const d = db();
@@ -209,6 +221,17 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     for (const [kind, list] of [['remind', dueReminders(d, now)], ['remind_today', dueCatchUp(d, now)]]) {
       for (const b of list) {
         if (await sendMail(kind, b)) { b.remindedAt = now.toISOString(); sent++; }
+      }
+    }
+    // キャンセルになりやすい予約には、3日前にも確認のメールを送る（設定で有効にしたとき。予測の見分ける力が十分なときだけ）
+    if (d.settings.mail.riskConfirm) {
+      const r = risk(now);
+      if (r.reliable) {
+        const target = core.addDays(core.nowJST(now).date, 3);
+        for (const x of r.upcoming.filter((u) => u.level === 'high' && u.date === target)) {
+          const b = d.bookings.find((y) => y.id === x.id);
+          if (b && b.status === 'booked' && !b.riskMailedAt && await sendMail('confirm3', b)) { b.riskMailedAt = now.toISOString(); sent++; }
+        }
       }
     }
     store.save();
@@ -386,7 +409,15 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       const to = q.get('to');
       if (!core.isDate(from) || !core.isDate(to) || core.diffDays(to, from) > 62) throw new AppError('期間の指定が正しくありません。');
       return send(res, 200, {
-        bookings: d.bookings.filter((b) => b.date >= from && b.date <= to).map(adminBooking),
+        bookings: (() => {
+          // 予測の見分ける力が十分なときだけ、キャンセルになりやすい予約に印を付ける
+          const r = risk();
+          const byId = new Map(r.reliable ? r.upcoming.map((x) => [x.id, x]) : []);
+          return d.bookings.filter((b) => b.date >= from && b.date <= to).map((b) => {
+            const x = byId.get(b.id);
+            return Object.assign(adminBooking(b), x ? { risk: { p: x.p, level: x.level, reasons: x.reasons } } : {});
+          });
+        })(),
         blocks: d.blocks.filter((k) => k.date >= from && k.date <= to).concat(core.expandRecurring(d, from, to)).map(hm),
         closedDays: d.closedDays.filter((c) => c.date >= from && c.date <= to),
         // 日ごと・担当者ごとの稼働率（カレンダーで「8割」を超えた日を目立たせるため）
@@ -578,6 +609,10 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       log('自分のパスワードを変更', '');
       store.save();
       return send(res, 200, { ok: true });
+    }
+    if (m === 'GET' && p === '/api/admin/risk') {
+      const r = risk();
+      return send(res, 200, Object.assign({}, r, { upcoming: r.upcoming.map((x) => Object.assign({}, x, { start: core.toHM(x.start) })) }));
     }
     if (m === 'GET' && p === '/api/admin/forecast') {
       return send(res, 200, forecast(d));

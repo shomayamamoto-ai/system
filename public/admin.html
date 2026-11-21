@@ -157,6 +157,16 @@
       <div id="trendLabels" class="trend-labels" aria-hidden="true"></div>
       <p id="trendNote" class="muted" style="margin-top:10px"></p>
     </div>
+    <div class="card stack-s" id="riskCard">
+      <h3>キャンセルになりやすい予約（これから2週間）</h3>
+      <div id="riskSummary"></div>
+      <div id="riskRows" class="rows"></div>
+      <p class="muted">
+        申し込みから面談までの日数、初めてかどうか、過去のキャンセル・無断キャンセル、メニューごとに、過去にキャンセル・無断キャンセルになった割合を数えて出しています。
+        「見分ける力」は、直近30日より前のデータで作った予測で、直近30日の予約を当ててみた結果です（0.5は当てずっぽうと同じ、1.0は完全に見分けられる）。
+        0.6以上のときだけ「要確認」の印を付けます。予測はあくまで目安です。お客様への対応を変えるときは、失礼のないようご注意ください。
+      </p>
+    </div>
     <div class="card stack-s" id="fcCard">
       <h3>これからの予約の見込み（4週間）</h3>
       <div id="fcSummary"></div>
@@ -295,6 +305,8 @@
         <select id="setReminderHour"></select>
       </label>
       <label>担当者への通知先（任意。お客様の予約・変更・キャンセルを、このアドレスへ知らせます）<input id="setNotify" type="email" inputmode="email" maxlength="120" placeholder="staff@example.com"></label>
+      <label class="check"><input id="setRiskConfirm" type="checkbox">キャンセルになりやすいと予測した予約には、3日前にも確認のメールを送る</label>
+      <p class="muted">予測の見分ける力が十分なとき（分析の「キャンセルになりやすい予約」で確認できます）だけ送ります。メールには、予測のことは書きません。</p>
       <form id="mailTest" class="row">
         <label class="grow">テスト送信のあて先<input name="to" type="email" inputmode="email" required placeholder="you@example.com"></label>
         <button type="submit" style="align-self:end">テスト送信</button>
