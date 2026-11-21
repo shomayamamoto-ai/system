@@ -431,3 +431,25 @@ test('メールの送り直し: 失敗を記録し、時間をおいて自動で
     assert.deepEqual(sent.slice(before).map((m) => m.subject.includes('キャンセル')), [true]); // キャンセルの知らせだけが届く
   } finally { s.close(); }
 });
+
+test('特定の日の受付時間: 管理者だけが設定でき、カレンダーに反映される', async () => {
+  const s = await boot({ adminPassword: 'secret-pass' });
+  try {
+    const owner = { cookie: (await s.req('/api/admin/login', 'POST', { loginId: 'admin', password: 'secret-pass' })).headers.get('set-cookie').split(';')[0] };
+    await s.req('/api/admin/users', 'POST', { name: '山本', loginId: 'yama', password: 'long-enough-pw', role: 'staff' }, owner);
+    const staff = { cookie: (await s.req('/api/admin/login', 'POST', { loginId: 'yama', password: 'long-enough-pw' })).headers.get('set-cookie').split(';')[0] };
+    const date = core.addDays(core.nowJST().date, 10);
+    const body = { staffId: 's1', date, start: '13:00', end: '16:00' };
+    assert.equal((await s.req('/api/admin/overrides', 'POST', body, staff)).status, 403);
+    const made = await (await s.req('/api/admin/overrides', 'POST', body, owner)).json();
+    const cal = await (await s.req(`/api/admin/calendar?from=${date}&to=${date}`, 'GET', null, owner)).json();
+    assert.deepEqual([cal.loads[date].s1.open, cal.loads[date].s1.close, cal.loads[date].s1.override], [780, 960, true]);
+    const cfg = await (await s.req('/api/admin/config', 'GET', null, owner)).json();
+    assert.equal(cfg.overrides.length, 1);
+    // 特別な時間に入った予約があると、元に戻せない
+    await s.req('/api/admin/bookings', 'POST', { serviceId: 'v1', staffId: 's1', date, start: '13:00', customerName: '山田' }, owner);
+    const wk = core.weekday(date);
+    if (wk === 0 || wk === 6) assert.equal((await s.req(`/api/admin/overrides/${made.id}`, 'DELETE', null, owner)).status, 409);
+    else assert.equal((await s.req(`/api/admin/overrides/${made.id}`, 'DELETE', null, owner)).status, 200); // 平日は13:00も元々受付時間内
+  } finally { s.close(); }
+});

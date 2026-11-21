@@ -289,6 +289,32 @@
     </div>
 
     <div class="card stack">
+      <h3>特定の日の受付時間</h3>
+      <p class="muted">
+        「12/24 だけ午前のみ」「来週の水曜だけ19時まで」「この日は休み」のように、日付を決めて担当者の受付時間を変えます。
+        休業日に登録した日でも、ここで時間を入れると、その担当者だけ特別に受け付けます。追加・削除はすぐに反映されます。
+      </p>
+      <div id="overrideList" class="rows"></div>
+      <form id="overrideForm" class="stack-s">
+        <div class="fields">
+          <label>担当者<select name="staffId" required></select></label>
+          <label>日付<input name="date" type="date" required></label>
+          <label>この日は<select name="mode"><option value="hours">受付時間を変える</option><option value="off">休みにする</option></select></label>
+        </div>
+        <div class="fields" id="overrideTimes">
+          <label>開始<input name="start" type="time" value="09:00"></label>
+          <label>終了<input name="end" type="time" value="12:00"></label>
+          <label>休憩の開始（任意）<input name="breakStart" type="time"></label>
+          <label>休憩の終了（任意）<input name="breakEnd" type="time"></label>
+        </div>
+        <div class="row">
+          <label class="grow">メモ（任意）<input name="note" maxlength="40" placeholder="例: 研修のため午前のみ"></label>
+          <button type="submit" style="align-self:end">設定する</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card stack">
       <h3>休業日</h3>
       <p class="muted">祝日・年末年始など、全員が予約を受けない日を登録します。追加・削除はすぐに反映されます。</p>
       <div id="closedList" class="rows"></div>

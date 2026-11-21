@@ -632,3 +632,61 @@ test('待ち行列理論: 分析で、8割を超えた日を数えて改善案�
   core.importCsv(calm, csv.split('\n').filter((l) => !/,1[4-6]:00,/.test(l)).join('\n'), NOW);
   assert.equal(analyze(calm, '2026-11-02', '2026-11-08', NOW).load.over, 0);
 });
+
+test('受付時間: 休憩を1日に複数入れられ、以前の形式（休憩1つ）も読める', () => {
+  const db = fresh();
+  core.updateConfig(db, { staff: [Object.assign({}, db.staff[0], { hours: [null, { start: '09:00', end: '18:00', breaks: [{ start: '12:00', end: '13:00' }, { start: '15:00', end: '15:30' }, { start: '', end: '' }].filter((x) => x.start) }] })], services: db.services });
+  db.settings.loadCap = 100;
+  const mon = core.freeSlots(db, { date: '2026-11-23', serviceId: 'v1', staffId: 's1' }, NOW).map((x) => x.start);
+  for (const t of ['12:00', '12:30', '15:00']) assert.ok(!mon.includes(t), t);
+  for (const t of ['11:30', '13:00', '14:30', '15:30']) assert.ok(mon.includes(t), t);
+  assert.equal(core.capacityMinutes(db, db.staff[0], '2026-11-23'), 540 - 90);
+  const bad = (breaks) => () => core.updateConfig(db, { staff: [Object.assign({}, db.staff[0], { hours: [null, { start: '09:00', end: '18:00', breaks }] })], services: db.services });
+  assert.throws(bad([{ start: '12:00', end: '13:00' }, { start: '12:30', end: '14:00' }]), /重なっています/);
+  assert.throws(bad([{ start: '08:00', end: '09:30' }]), /休憩時間が正しくありません/);
+  // 以前の形式で保存されたデータを読み込むと、休憩の一覧に直る
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yoyaku-'));
+  try {
+    const old = core.defaultData();
+    old.staff[0].hours[1] = { start: '09:00', end: '18:00', breakStart: '12:00', breakEnd: '13:00' };
+    fs.writeFileSync(path.join(dir, 'db.json'), JSON.stringify(old));
+    const loaded = new core.Store(path.join(dir, 'db.json')).db;
+    assert.deepEqual(loaded.staff[0].hours[1], { start: '09:00', end: '18:00', breaks: [{ start: '12:00', end: '13:00' }] });
+    assert.deepEqual(loaded.overrides, []);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('特定の日の受付時間: 変更・休み・休業日の特別営業が空き枠に反映される', () => {
+  const db = fresh();
+  db.settings.loadCap = 100;
+  const slots = (date) => core.freeSlots(db, { date, serviceId: 'v1', staffId: 's1' }, NOW).map((x) => x.start);
+  // 11/24（火）だけ 9:00〜12:00、10:00〜10:30 は休憩
+  core.setOverride(db, { staffId: 's1', date: '2026-11-24', start: '09:00', end: '12:00', breaks: [{ start: '10:00', end: '10:30' }], note: '研修' }, NOW);
+  assert.deepEqual(slots('2026-11-24'), ['09:00', '09:30', '10:30', '11:00', '11:30']);
+  assert.equal(slots('2026-12-01')[0], '09:00'); // ほかの火曜はいつもどおり
+  assert.equal(slots('2026-12-01').at(-1), '17:30');
+  // 同じ日に設定し直すと、置きかわる（休みにする）
+  core.setOverride(db, { staffId: 's1', date: '2026-11-24', off: true }, NOW);
+  assert.deepEqual(slots('2026-11-24'), []);
+  assert.equal(db.overrides.length, 1);
+  // 休業日でも、特定の日の設定があれば、その担当者だけ受け付ける（土曜の特別営業も同じ）
+  core.addClosedDay(db, { date: '2026-11-26', title: '臨時休業' });
+  core.setOverride(db, { staffId: 's1', date: '2026-11-26', start: '13:00', end: '15:00' }, NOW);
+  assert.deepEqual(slots('2026-11-26'), ['13:00', '13:30', '14:00', '14:30']);
+  assert.deepEqual(core.freeSlots(db, { date: '2026-11-26', serviceId: 'v1', staffId: 's2' }, NOW), []);
+  core.setOverride(db, { staffId: 's1', date: '2026-11-28', start: '10:00', end: '12:00' }, NOW); // 土曜
+  assert.equal(slots('2026-11-28').length, 4);
+  assert.equal(core.capacityMinutes(db, db.staff[0], '2026-11-28'), 120);
+  // 予約が受付時間の外になる変更は止める。過去の日付は設定できない
+  book(db, { date: '2026-12-01', start: '15:00' });
+  assert.throws(() => core.setOverride(db, { staffId: 's1', date: '2026-12-01', start: '09:00', end: '12:00' }, NOW), /受付時間の外/);
+  assert.throws(() => core.setOverride(db, { staffId: 's1', date: '2026-12-01', off: true }, NOW), /受付時間の外/);
+  assert.throws(() => core.setOverride(db, { staffId: 's1', date: '2026-11-10', off: true }, NOW), /過去/);
+  // 担当者を削除すると、その人の設定も消える
+  core.setBookingStatus(db, db.bookings[0].id, 'cancelled', NOW);
+  core.updateConfig(db, { staff: [db.staff[1]], services: db.services });
+  assert.deepEqual(db.overrides, []);
+});

@@ -229,8 +229,9 @@ function drawWeek() {
   }
   // 表示する時間帯: 受付時間と、その週の予約・予定がすべて入る範囲
   const staff = state.config.staff.filter((s) => !state.staffFilter || s.id === state.staffFilter);
-  const opens = staff.flatMap((s) => s.hours.filter(Boolean).map((h) => toMin(h.start)));
-  const closes = staff.flatMap((s) => s.hours.filter(Boolean).map((h) => toMin(h.end)));
+  const dayHoursOf = (d) => staff.map((x) => ((weekData.loads || {})[d] || {})[x.id]).filter((l) => l && l.open != null);
+  const opens = week.flatMap((w) => dayHoursOf(w.d).map((l) => l.open));
+  const closes = week.flatMap((w) => dayHoursOf(w.d).map((l) => l.close));
   const all = week.flatMap((w) => w.items);
   const first = Math.floor(Math.min(9 * 60, ...opens, ...all.map((x) => toMin(x.start))) / 60);
   const last = Math.ceil(Math.max(18 * 60, ...closes, ...all.map((x) => toMin(x.end))) / 60);
@@ -250,13 +251,14 @@ function drawWeek() {
     const ld = loadOf(d);
     head.push(el('div', { className: isToday ? 'today' : '' }, `${WD[wd(d)]}`, el('span', { className: 'd', textContent: String(Number(d.slice(8))) }),
       w.closed ? el('span', { className: 'tag', textContent: w.closed.title }) : null,
+      dayHoursOf(d).some((l) => l.override) || staff.some((x) => (((weekData.loads || {})[d] || {})[x.id] || {}).override) ? el('span', { className: 'tag', textContent: '時間変更あり' }) : null,
       !w.closed && ld ? el('span', { className: 'load' + (ld.over ? ' over' : ''), title: `稼働率（予約で埋まった時間の割合）: ${ld.detail}`, textContent: ld.text }) : null));
     const col = el('div', { className: 'tcol' + (w.closed ? ' closed' : '') + (d === state.cursor ? ' sel' : ''), style: `height:${height}px` });
     // 受付時間の外をうすく塗る（全員が休みの時間帯）
     if (!w.closed) {
-      const hs = staff.map((s) => s.hours[wd(d)]).filter(Boolean);
-      const open = hs.length ? Math.min(...hs.map((h) => toMin(h.start))) : last * 60;
-      const shut = hs.length ? Math.max(...hs.map((h) => toMin(h.end))) : last * 60;
+      const hs = dayHoursOf(d);
+      const open = hs.length ? Math.min(...hs.map((h) => h.open)) : last * 60;
+      const shut = hs.length ? Math.max(...hs.map((h) => h.close)) : last * 60;
       if (open > first * 60) col.append(el('div', { className: 'off', style: `top:0;height:${y(Math.min(open, last * 60))}px` }));
       if (hs.length && shut < last * 60) col.append(el('div', { className: 'off', style: `top:${y(shut)}px;bottom:0` }));
     }
@@ -748,6 +750,7 @@ const dirty = () => { isDirty = true; $('saved').textContent = '変更があり�
 async function loadSettings() {
   if (!draft) draft = JSON.parse(JSON.stringify(state.config));
   renderSettings();
+  loadOverrides();
   await Promise.all([loadClosed(), loadUsers()]);
 }
 function renderSettings() {
@@ -800,26 +803,40 @@ function renderSettings() {
   // 担当者: 曜日ごとの受付時間と休憩
   $('staffList').replaceChildren(...draft.staff.map((s, i) => {
     const rows = [1, 2, 3, 4, 5, 6, 0].map((d) => {
-      const row = el('div', { className: 'h' });
+      const row = el('div', { className: 'hgroup' });
       const draw = () => {
         const h = s.hours[d];
-        const time = (key, label) => {
-          const t = input({ type: 'time', value: h ? h[key] || '' : '', disabled: !h }, (x) => { s.hours[d][key] = x.value; });
+        if (h && !Array.isArray(h.breaks)) h.breaks = h.breakStart && h.breakEnd ? [{ start: h.breakStart, end: h.breakEnd }] : [];
+        const time = (obj, key, label) => {
+          const t = input({ type: 'time', value: obj ? obj[key] || '' : '', disabled: !h }, (x) => { obj[key] = x.value; });
           t.setAttribute('aria-label', `${WD[d]}曜の${label}`);
           return t;
         };
         const on = el('input', { type: 'checkbox', checked: Boolean(h) });
-        on.addEventListener('change', () => { s.hours[d] = on.checked ? { start: '09:00', end: '18:00' } : null; dirty(); draw(); });
-        row.className = 'h' + (h ? '' : ' off');
-        row.replaceChildren(el('label', { className: 'check' }, on, `${WD[d]}曜`),
-          time('start', '開始'), time('end', '終了'), el('span', { className: 'rest', textContent: '休憩' }), time('breakStart', '休憩開始'), time('breakEnd', '休憩終了'));
+        on.addEventListener('change', () => { s.hours[d] = on.checked ? { start: '09:00', end: '18:00', breaks: [] } : null; dirty(); draw(); });
+        const breaks = h ? h.breaks : [];
+        const first = breaks[0] || (h ? (breaks[0] = { start: '', end: '' }) : null);
+        const addBtn = el('button', { type: 'button', className: 'small', textContent: '＋', disabled: !h || breaks.length >= 5 });
+        addBtn.setAttribute('aria-label', `${WD[d]}曜の休憩を追加`);
+        addBtn.addEventListener('click', () => { breaks.push({ start: '', end: '' }); dirty(); draw(); });
+        const lines = [el('div', { className: 'h' + (h ? '' : ' off') }, el('label', { className: 'check' }, on, `${WD[d]}曜`),
+          time(h, 'start', '開始'), time(h, 'end', '終了'), el('span', { className: 'rest', textContent: '休憩' }),
+          time(first, 'start', '休憩開始'), time(first, 'end', '休憩終了'), addBtn)];
+        breaks.slice(1).forEach((br, i) => {
+          const del = el('button', { type: 'button', className: 'small danger', textContent: '×' });
+          del.setAttribute('aria-label', `${WD[d]}曜の休憩${i + 2}を削除`);
+          del.addEventListener('click', () => { breaks.splice(i + 1, 1); dirty(); draw(); });
+          lines.push(el('div', { className: 'h extra' }, el('span'), el('span'), el('span'), el('span', { className: 'rest', textContent: `休憩${i + 2}` }),
+            time(br, 'start', `休憩${i + 2}の開始`), time(br, 'end', `休憩${i + 2}の終了`), del));
+        });
+        row.replaceChildren(...lines);
       };
       draw();
       return row;
     });
     const copy = el('button', { className: 'small', textContent: '月曜の時間を平日すべてにコピー' });
     copy.addEventListener('click', () => {
-      for (const d of [2, 3, 4, 5]) s.hours[d] = s.hours[1] ? { ...s.hours[1] } : null;
+      for (const d of [2, 3, 4, 5]) s.hours[d] = s.hours[1] ? JSON.parse(JSON.stringify(s.hours[1])) : null;
       dirty(); renderSettings();
     });
     return el('div', { className: 'stack-s block-item' },
@@ -875,6 +892,7 @@ $('questionAdd').addEventListener('click', () => {
 $('serviceAdd').addEventListener('click', () => { draft.services.push({ id: '', name: '', minutes: 60, description: '' }); dirty(); renderSettings(); });
 $('saveSettings').addEventListener('click', guard(async () => {
   readTopFields();
+  for (const st of draft.staff) for (const h of st.hours) if (h && Array.isArray(h.breaks)) h.breaks = h.breaks.filter((x) => x.start || x.end);
   await call('/api/admin/config', 'PUT', draft);
   isDirty = false;
   await refreshConfig();
@@ -887,6 +905,33 @@ $('mailTest').addEventListener('submit', guard(async (ev) => {
   ev.preventDefault();
   await call('/api/admin/mail/test', 'POST', { to: ev.target.to.value });
   toast('テストメールを送信しました。受信箱を確認してください。');
+}));
+
+// 特定の日の受付時間（追加・削除はすぐに反映）
+function loadOverrides() {
+  const f = $('overrideForm');
+  f.staffId.replaceChildren(...options(state.config.staff));
+  if (!f.date.value) f.date.value = state.config.today;
+  const list = state.config.overrides || [];
+  $('overrideList').replaceChildren(...(list.length ? list.map((o) => {
+    const del = el('button', { className: 'small danger', textContent: '削除' });
+    del.addEventListener('click', guard(async () => { await call(`/api/admin/overrides/${o.id}`, 'DELETE'); await refreshConfig(); loadOverrides(); toast('元の受付時間に戻しました。'); }));
+    const hm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    const what = o.off ? '休み' : `${hm(o.start)}〜${hm(o.end)}${o.breaks.length ? `（休憩 ${o.breaks.map((x) => `${hm(x.start)}〜${hm(x.end)}`).join('、')}）` : ''}`;
+    return el('div', { className: 'rowitem' }, el('span', { className: 'main', textContent: `${jpFull(o.date)}　${staffName(o.staffId)}` }),
+      el('span', { className: 'sub', textContent: what + (o.note ? `／${o.note}` : '') }), el('span', { className: 'side' }, del));
+  }) : [empty('これからの日付の設定はありません。')]));
+}
+$('overrideForm').mode.addEventListener('change', (ev) => { $('overrideTimes').hidden = ev.target.value === 'off'; });
+$('overrideForm').addEventListener('submit', guard(async (ev) => {
+  ev.preventDefault();
+  const f = ev.target;
+  const body = { staffId: f.staffId.value, date: f.date.value, off: f.mode.value === 'off', start: f.start.value, end: f.end.value, note: f.note.value,
+    breaks: f.breakStart.value || f.breakEnd.value ? [{ start: f.breakStart.value, end: f.breakEnd.value }] : [] };
+  await call('/api/admin/overrides', 'POST', body);
+  await refreshConfig();
+  loadOverrides();
+  toast(`${jp(body.date)}の${staffName(body.staffId)}の受付時間を設定しました。`);
 }));
 
 // 休業日（追加・削除はすぐに反映）

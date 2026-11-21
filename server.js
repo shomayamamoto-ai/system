@@ -317,6 +317,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     if (m === 'GET' && p === '/api/admin/config') {
       return send(res, 200, {
         settings: d.settings, staff: d.staff, services: d.services, closedDays: d.closedDays,
+        overrides: (d.overrides || []).filter((o) => o.date >= core.nowJST().date),
         today: core.nowJST().date, protected: isProtected(req), user: { name: me.name, role: me.role, builtin: me.id === 'admin' || me.id === 'open' },
         mail: { enabled: mail.enabled, from: mail.from, hasPublicUrl: Boolean(publicUrl) },
       });
@@ -343,7 +344,10 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
             out[day] = {};
             for (const st of d.staff) {
               const l = core.dayLoad(d, st, day);
-              if (l.capacity || l.booked) out[day][st.id] = { booked: l.booked, capacity: l.capacity };
+              const h = core.dayHours(d, st, day);
+              if (l.capacity || l.booked || h) {
+                out[day][st.id] = { booked: l.booked, capacity: l.capacity, open: h ? h.open : null, close: h ? h.close : null, override: Boolean(core.overrideFor(d, st.id, day)) };
+              }
             }
           }
           return out;
@@ -429,6 +433,31 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       const item = d[key].find((k) => k.id === match[2]);
       d[key] = d[key].filter((k) => k.id !== match[2]);
       if (item) log(key === 'recurring' ? '毎週の予定を削除' : '予定を削除', item.title);
+      store.save();
+      return send(res, 200, { ok: true });
+    }
+    if (m === 'POST' && p === '/api/admin/overrides') {
+      ownerOnly();
+      const o = core.setOverride(d, await readBody(req));
+      const who = (core.findStaff(d, o.staffId) || {}).name;
+      log('特定の日の受付時間を設定', `${o.date}／${who}／${o.off ? '休み' : `${core.toHM(o.start)}〜${core.toHM(o.end)}`}`);
+      store.save();
+      return send(res, 201, o);
+    }
+    match = /^\/api\/admin\/overrides\/([\w-]+)$/.exec(p);
+    if (m === 'DELETE' && match) {
+      ownerOnly();
+      const o = (d.overrides || []).find((x) => x.id === match[1]);
+      if (!o) throw new AppError('設定が見つかりません。', 404);
+      // 元の受付時間に戻すと予約が受付時間の外になる場合は止める
+      const tmp = d.overrides.filter((x) => x !== o);
+      const staff = core.findStaff(d, o.staffId);
+      const back = staff && core.dayHours(Object.assign({}, d, { overrides: tmp }), staff, o.date);
+      const outside = d.bookings.filter((b) => b.staffId === o.staffId && b.date === o.date && b.status === 'booked' &&
+        (!back || b.start < back.open || b.end > back.close || back.rests.some(([x, y]) => core.overlaps(b.start, b.end, x, y))));
+      if (outside.length) throw new AppError(`元の受付時間に戻すと、予約 ${outside.length}件が受付時間の外になります。先に予約を調整してください。`, 409);
+      d.overrides = tmp;
+      log('特定の日の受付時間を削除', `${o.date}／${staff ? staff.name : ''}`);
       store.save();
       return send(res, 200, { ok: true });
     }
