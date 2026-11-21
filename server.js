@@ -12,6 +12,7 @@ const core = require('./lib/core');
 const auth = require('./lib/auth');
 const { analyze, updateRules } = require('./lib/analytics');
 const { forecast } = require('./lib/forecast');
+const wl = require('./lib/waitlist');
 const { createMailer, buildMail, buildStaffMail, dueReminders, dueCatchUp, stillRelevant } = require('./lib/mailer');
 
 const { AppError } = core;
@@ -173,6 +174,28 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     mail.send(buildStaffMail(kind, db(), b, publicUrl)).catch((err) => console.error('担当者あてメールの送信に失敗:', err.message));
   };
   // 定期的に行うメールの仕事: 失敗したメールの送り直し → 前日リマインド → 送りそこねた分の当日リマインド
+  // キャンセル待ち: 空きが出た登録者へ知らせる（予約が空いたときと、定期の確認のときに呼ぶ）
+  let checkingWaitlist = false;
+  async function checkWaitlist(now = new Date()) {
+    if (!mail.enabled || checkingWaitlist) return 0;
+    checkingWaitlist = true;
+    try {
+      const d = db();
+      let sent = 0;
+      for (const { w, slots } of wl.dueWaitlist(d, now)) {
+        try {
+          await mail.send(wl.buildWaitlistMail('open', d, w, slots, publicUrl));
+          Object.assign(w, { status: 'notified', notifiedAt: now.toISOString() });
+          sent++;
+        } catch (err) { console.error('キャンセル待ちのお知らせの送信に失敗:', err.message); }
+      }
+      if (sent) core.notify(d, 'waitlist', 'キャンセル待ちの方へ、空きをお知らせしました', `${sent}人へメールを送りました（先着順のご案内です）。`);
+      store.save();
+      return sent;
+    } finally { checkingWaitlist = false; }
+  }
+  const kickWaitlist = () => { setImmediate(() => checkWaitlist().catch((e) => console.error(e))); };
+
   async function runReminders(now = new Date()) {
     if (!mail.enabled) return 0;
     const d = db();
@@ -181,6 +204,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       d.outbox = d.outbox.filter((x) => x !== o);
       if (stillRelevant(o.kind, b, now)) await sendMail(o.kind, b, { retry: true, attempts: o.attempts });
     }
+    await checkWaitlist(now);
     let sent = 0;
     for (const [kind, list] of [['remind', dueReminders(d, now)], ['remind_today', dueCatchUp(d, now)]]) {
       for (const b of list) {
@@ -232,7 +256,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     // ----- お客様向け -----
     if (m === 'GET' && p === '/api/public/config') {
       return send(res, 200, {
-        site: d.settings.site, questions: d.settings.questions,
+        site: d.settings.site, questions: d.settings.questions, waitlist: mail.enabled,
         services: d.services, staff: d.staff.map((s) => ({ id: s.id, name: s.name })),
         windowDays: d.settings.windowDays, today: core.nowJST().date,
       });
@@ -266,6 +290,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       store.save();
       mailLater('change', b);
       tellStaff('change', b);
+      kickWaitlist(); // 空きが出たかもしれないので、キャンセル待ちを確認する
       return send(res, 200, publicBooking(b));
     }
     if (m === 'POST' && p === '/api/public/cancel') {
@@ -275,7 +300,32 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       store.save();
       mailLater('cancel', b);
       tellStaff('cancel', b);
+      kickWaitlist();
       return send(res, 200, publicBooking(b));
+    }
+    if (m === 'POST' && p === '/api/public/waitlist') {
+      busy();
+      if (!mail.enabled) throw new AppError('キャンセル待ちは、いまは受け付けていません。', 409);
+      const w = wl.addWaitlist(d, await readBody(req));
+      core.notify(d, 'waitlist', 'キャンセル待ちの登録がありました', `${w.date}（${wl.PARTS[w.part]}）／${(core.findService(d, w.serviceId) || {}).name || ''}／${w.customerName} 様`);
+      store.save();
+      mail.send(wl.buildWaitlistMail('accepted', d, w, [], publicUrl)).catch((err) => console.error('キャンセル待ちの受付メールの送信に失敗:', err.message));
+      return send(res, 201, { id: w.id, token: w.token, date: w.date, part: w.part, status: w.status });
+    }
+    if (m === 'GET' && p === '/api/public/waitlist') {
+      const w = (d.waitlist || []).find((x) => x.id === q.get('id'));
+      const token = String(q.get('token') || '');
+      const digest = (v) => crypto.createHash('sha256').update(String(v)).digest();
+      if (!w || !crypto.timingSafeEqual(digest(token), digest(w.token))) throw new AppError('キャンセル待ちの登録が見つかりません。', 404);
+      return send(res, 200, { id: w.id, date: w.date, part: wl.PARTS[w.part], status: w.status, customerName: w.customerName,
+        serviceName: (core.findService(d, w.serviceId) || {}).name || '' });
+    }
+    if (m === 'POST' && p === '/api/public/waitlist/cancel') {
+      busy();
+      const body = await readBody(req);
+      const w = wl.cancelWaitlist(d, body.id, body.token);
+      store.save();
+      return send(res, 200, { id: w.id, status: w.status });
     }
 
     // ----- 管理者向け -----
@@ -327,6 +377,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       ownerOnly();
       core.updateConfig(d, await readBody(req));
       log('設定を変更', '担当者・メニュー・受け付け方');
+      kickWaitlist(); // 空きが出たかもしれないので、キャンセル待ちを確認する
       store.save();
       return send(res, 200, { ok: true });
     }
@@ -385,10 +436,12 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
         b = core.setBookingStatus(d, match[1], body.status);
         log('予約の状態を変更', `${say(b)} →「${{ booked: '予約済', completed: '完了', noshow: '無断キャンセル', cancelled: 'キャンセル' }[b.status]}」`);
         if (b.status === 'cancelled' && b.date >= core.nowJST().date) mailLater('cancel', b);
+        kickWaitlist(); // 空きが出たかもしれないので、キャンセル待ちを確認する
       } else {
         b = core.rescheduleBooking(d, match[1], body);
         log('予約の日時を変更', say(b));
         mailLater('change', b);
+        kickWaitlist(); // 空きが出たかもしれないので、キャンセル待ちを確認する
       }
       store.save();
       return send(res, 200, adminBooking(b));
@@ -410,6 +463,24 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       log('予約確認メールを送り直し', say(b));
       store.save();
       return send(res, 200, adminBooking(b));
+    }
+    if (m === 'GET' && p === '/api/admin/waitlist') {
+      const today = core.nowJST().date;
+      const list = (d.waitlist || []).filter((w) => w.date >= today && ['waiting', 'notified'].includes(w.status))
+        .sort((x, y) => (x.date === y.date ? (x.createdAt < y.createdAt ? -1 : 1) : x.date < y.date ? -1 : 1))
+        .map((w) => ({ id: w.id, date: w.date, part: wl.PARTS[w.part], status: w.status, customerName: w.customerName, email: w.email,
+          serviceName: (core.findService(d, w.serviceId) || {}).name || '', staffName: w.staffId === 'any' ? '指名なし' : (core.findStaff(d, w.staffId) || {}).name || '',
+          createdAt: w.createdAt, notifiedAt: w.notifiedAt }));
+      return send(res, 200, { waitlist: list, enabled: mail.enabled });
+    }
+    match = /^\/api\/admin\/waitlist\/([\w-]+)$/.exec(p);
+    if (m === 'DELETE' && match) {
+      const w = (d.waitlist || []).find((x) => x.id === match[1]);
+      if (!w) throw new AppError('キャンセル待ちの登録が見つかりません。', 404);
+      w.status = 'cancelled';
+      log('キャンセル待ちを削除', `${w.date}／${w.customerName} 様`);
+      store.save();
+      return send(res, 200, { ok: true });
     }
     if (m === 'GET' && p === '/api/admin/customers') {
       return send(res, 200, core.customers(d, q.get('q')));
@@ -437,6 +508,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       const item = d[key].find((k) => k.id === match[2]);
       d[key] = d[key].filter((k) => k.id !== match[2]);
       if (item) log(key === 'recurring' ? '毎週の予定を削除' : '予定を削除', item.title);
+      kickWaitlist(); // 空きが出たかもしれないので、キャンセル待ちを確認する
       store.save();
       return send(res, 200, { ok: true });
     }
@@ -445,6 +517,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       const o = core.setOverride(d, await readBody(req));
       const who = (core.findStaff(d, o.staffId) || {}).name;
       log('特定の日の受付時間を設定', `${o.date}／${who}／${o.off ? '休み' : `${core.toHM(o.start)}〜${core.toHM(o.end)}`}`);
+      kickWaitlist(); // 空きが出たかもしれないので、キャンセル待ちを確認する
       store.save();
       return send(res, 201, o);
     }
@@ -462,6 +535,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       if (outside.length) throw new AppError(`元の受付時間に戻すと、予約 ${outside.length}件が受付時間の外になります。先に予約を調整してください。`, 409);
       d.overrides = tmp;
       log('特定の日の受付時間を削除', `${o.date}／${staff ? staff.name : ''}`);
+      kickWaitlist(); // 空きが出たかもしれないので、キャンセル待ちを確認する
       store.save();
       return send(res, 200, { ok: true });
     }
@@ -484,6 +558,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       ownerOnly();
       d.closedDays = d.closedDays.filter((c) => c.date !== match[1]);
       log('休業日を削除', match[1]);
+      kickWaitlist(); // 空きが出たかもしれないので、キャンセル待ちを確認する
       store.save();
       return send(res, 200, { ok: true });
     }

@@ -151,7 +151,7 @@ test('空き状況: 日ごとの枠数が返り、埋まると減る', () => {
   const db = fresh();
   const before = core.availability(db, { from: '2026-11-01', to: '2026-11-30', serviceId: 'v2', staffId: 's1' }, NOW);
   assert.equal(before['2026-11-15'], undefined); // 過去
-  assert.equal(before['2026-11-21'], 0); // 土曜
+  assert.equal(before['2026-11-21'], undefined); // 土曜は受付なし（空きなし＝0 とは区別する）
   book(db);
   const after = core.availability(db, { from: '2026-11-17', to: '2026-11-17', serviceId: 'v2', staffId: 's1' }, NOW);
   assert.equal(after['2026-11-17'], before['2026-11-17'] - 3);
@@ -224,7 +224,7 @@ test('受付時間: 曜日ごとの時間・休憩・休業日・毎週の予定
 
   core.addClosedDay(db, { date: '2026-11-19', title: '臨時休業' });
   assert.deepEqual(slotsOn('2026-11-19'), []);
-  assert.equal(core.availability(db, { from: '2026-11-19', to: '2026-11-19', serviceId: 'v1', staffId: 'any' }, NOW)['2026-11-19'], 0);
+  assert.equal(core.availability(db, { from: '2026-11-19', to: '2026-11-19', serviceId: 'v1', staffId: 'any' }, NOW)['2026-11-19'], undefined); // 休業日は受付なし
   assert.throws(() => core.addClosedDay(db, { date: '2026-11-19' }), /すでに/);
   book(db, { date: '2026-11-20' });
   assert.throws(() => core.addClosedDay(db, { date: '2026-11-20' }), /予約が1件/);
@@ -791,4 +791,43 @@ test('予約数の予測: 同じ曜日の過去8週間の平均で見込み、�
   // 見込み稼働率（30分 × 6件 ÷ 受付時間 1080分）と判定
   assert.equal(Math.round(tue.load * 100), Math.round((6 * 30 / 1080) * 100));
   assert.equal(tue.level, 'quiet');
+});
+
+test('キャンセル待ち: 埋まっている日に登録でき、空きが出たら知らせる対象になる', () => {
+  const w = require('../lib/waitlist');
+  const db = fresh();
+  db.settings.loadCap = 100;
+  // 11/17（火）の担当者A・午前を埋める（9:00〜12:00 の60分×3件）
+  for (const t of ['09:00', '10:00', '11:00']) book(db, { start: t, email: `x${t.slice(0, 2)}@example.com` });
+  const reg = (over) => w.addWaitlist(db, Object.assign({ serviceId: 'v2', staffId: 's1', date: '2026-11-17', part: 'am', customerName: '待つ人', email: 'Wait@Example.com' }, over), NOW);
+  // 午後は空いているので、終日・午後の登録は「そのまま予約を」と断る
+  assert.throws(() => reg({ part: 'any' }), /いま空いている時間があります/);
+  assert.throws(() => reg({ part: 'pm' }), /いま空いている時間があります/);
+  const a = reg();
+  assert.equal(a.email, 'wait@example.com');
+  assert.throws(() => reg(), /すでにキャンセル待ち/);
+  assert.throws(() => reg({ date: '2026-10-01' }), /受け付けている期間/);
+  assert.throws(() => reg({ customerName: 'http://spam' }), /URL/);
+  assert.throws(() => reg({ date: '2026-11-21' }), /受付をしていません/); // 土曜（担当者Aは休み）
+  assert.equal(core.availability(db, { from: '2026-11-21', to: '2026-11-21', serviceId: 'v2', staffId: 's1' }, NOW)['2026-11-21'], undefined);
+  assert.deepEqual(w.dueWaitlist(db, NOW), []);
+  // 10:00 の予約がキャンセルされると、知らせる対象になる
+  core.setBookingStatus(db, db.bookings[1].id, 'cancelled', NOW);
+  const due = w.dueWaitlist(db, NOW);
+  assert.equal(due.length, 1);
+  assert.deepEqual(due[0].slots, ['10:00']);
+  const m = w.buildWaitlistMail('open', db, a, due[0].slots, 'https://yoyaku.example.com');
+  assert.match(m.subject, /空きが出ました/);
+  assert.ok(m.text.includes('https://yoyaku.example.com/?date=2026-11-17&service=v2'));
+  assert.ok(m.text.includes('先着順'));
+  // 取り消し（合言葉が違えば断る）。日付が過ぎた登録は「期限切れ」になる
+  assert.throws(() => w.cancelWaitlist(db, a.id, 'x'), /見つかりません/);
+  w.cancelWaitlist(db, a.id, a.token);
+  assert.equal(a.status, 'cancelled');
+  assert.deepEqual(w.dueWaitlist(db, NOW), []);
+  // 期限切れ
+  db.bookings[1].status = 'booked'; // 10:00 をまた埋める
+  const c = reg({ email: 'other@example.com' });
+  w.dueWaitlist(db, new Date('2026-11-18T00:00:00Z'));
+  assert.equal(c.status, 'expired');
 });

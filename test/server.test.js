@@ -453,3 +453,59 @@ test('特定の日の受付時間: 管理者だけが設定でき、カレンダ
     else assert.equal((await s.req(`/api/admin/overrides/${made.id}`, 'DELETE', null, owner)).status, 200); // 平日は13:00も元々受付時間内
   } finally { s.close(); }
 });
+
+test('キャンセル待ち: 登録すると受付メール、キャンセルで空くと空きのお知らせが届く', async () => {
+  const sent = [];
+  const mailer = { enabled: true, from: 'no-reply@example.com', send: async (m) => { sent.push(m); } };
+  const s = await boot({ mailer, publicUrl: 'https://yoyaku.example.com', adminPassword: 'secret-pass' });
+  try {
+    const owner = { cookie: (await s.req('/api/admin/login', 'POST', { loginId: 'admin', password: 'secret-pass' })).headers.get('set-cookie').split(';')[0] };
+    const tick = () => new Promise((r) => setTimeout(r, 30));
+    // 3日後以降の平日を1つ選び、担当者Aの午前を管理画面からすべて埋める
+    let date = core.addDays(core.nowJST().date, 3);
+    while ([0, 6].includes(core.weekday(date))) date = core.addDays(date, 1);
+    const made = [];
+    for (const t of ['09:00', '10:00', '11:00']) {
+      made.push(await (await s.req('/api/admin/bookings', 'POST', { serviceId: 'v2', staffId: 's1', date, start: t, customerName: `埋${t}`, email: `u${t.slice(0, 2)}@example.com` }, owner)).json());
+    }
+    const cfg = await (await s.req('/api/public/config')).json();
+    assert.equal(cfg.waitlist, true);
+    const w = await s.req('/api/public/waitlist', 'POST', { serviceId: 'v2', staffId: 's1', date, part: 'am', customerName: '待つ人', email: 'wait@example.com' });
+    assert.equal(w.status, 201);
+    const reg = await w.json();
+    await tick();
+    assert.ok(sent.some((m) => m.to === 'wait@example.com' && /キャンセル待ちを受け付けました/.test(m.subject) && m.text.includes(`?wl=${reg.id}&token=${reg.token}`)));
+    assert.equal((await (await s.req('/api/admin/waitlist', 'GET', null, owner)).json()).waitlist.length, 1);
+    // 10:00 の予約をキャンセル → すぐに空きのお知らせ
+    await s.req(`/api/admin/bookings/${made[1].id}`, 'PATCH', { status: 'cancelled' }, owner);
+    await tick(); await tick();
+    const open = sent.find((m) => m.to === 'wait@example.com' && /空きが出ました/.test(m.subject));
+    assert.ok(open);
+    assert.ok(open.text.includes('10:00'));
+    const st = await (await s.req(`/api/public/waitlist?id=${reg.id}&token=${reg.token}`)).json();
+    assert.equal(st.status, 'notified');
+    // 2回目のキャンセルでは、すでに知らせた人へ重ねて送らない
+    const before = sent.length;
+    await s.req(`/api/admin/bookings/${made[2].id}`, 'PATCH', { status: 'cancelled' }, owner);
+    await tick(); await tick();
+    assert.equal(sent.filter((m, i) => i >= before && m.to === 'wait@example.com').length, 0);
+    // お客様による取り消し（取り消した登録には、空きが出ても知らせない）
+    await s.req(`/api/admin/bookings/${made[1].id}`, 'PATCH', { status: 'booked' }, owner);
+    await s.req(`/api/admin/bookings/${made[2].id}`, 'PATCH', { status: 'booked' }, owner);
+    const r2 = await (await s.req('/api/public/waitlist', 'POST', { serviceId: 'v2', staffId: 's1', date, part: 'am', customerName: '別の人', email: 'b@example.com' })).json();
+    assert.equal((await s.req('/api/public/waitlist/cancel', 'POST', { id: r2.id, token: r2.token })).status, 200);
+    const n = sent.length;
+    await s.req(`/api/admin/bookings/${made[0].id}`, 'PATCH', { status: 'cancelled' }, owner);
+    await tick(); await tick();
+    assert.equal(sent.slice(n).filter((m) => m.to === 'b@example.com').length, 0);
+  } finally { s.close(); }
+});
+
+test('キャンセル待ち: メール送信が設定されていなければ受け付けない', async () => {
+  const s = await boot({});
+  try {
+    assert.equal((await (await s.req('/api/public/config')).json()).waitlist, false);
+    const r = await s.req('/api/public/waitlist', 'POST', { serviceId: 'v1', staffId: 'any', date: core.nowJST().date, customerName: 'x', email: 'x@example.com' });
+    assert.equal(r.status, 409);
+  } finally { s.close(); }
+});

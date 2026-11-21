@@ -527,7 +527,27 @@ $('blockForm').addEventListener('submit', async (ev) => {
 // ---------- 予約一覧 ----------
 const pill = (status) => el('span', { className: 'pill ' + status, textContent: STATUS[status] });
 const query = (form) => new URLSearchParams([...new FormData(form)].filter(([, v]) => v)).toString();
+// キャンセル待ち（これからの日付で、待っている人・お知らせ済みの人）
+async function loadWaitlist() {
+  const data = await call('/api/admin/waitlist');
+  $('waitNote').textContent = data.enabled
+    ? '空きが出ると、登録した人へ自動でメールを送ります（先着順のご案内）。お知らせのあと、予約が自動で確定することはありません。'
+    : 'メール送信が設定されていないため、予約ページではキャンセル待ちを受け付けていません。';
+  $('waitRows').replaceChildren(...(data.waitlist.length ? data.waitlist.map((w) => {
+    const del = el('button', { className: 'small danger', textContent: '削除' });
+    del.addEventListener('click', guard(async () => {
+      if (!confirm(`${w.customerName} 様のキャンセル待ちを削除します。よろしいですか？`)) return;
+      await call(`/api/admin/waitlist/${w.id}`, 'DELETE');
+      await loadWaitlist();
+    }));
+    return el('div', { className: 'rowitem' },
+      el('span', { className: 'main', textContent: `${jpFull(w.date)}（${w.part}）　${w.customerName} 様` }),
+      el('span', { className: 'sub', textContent: `${w.serviceName}／${w.staffName}／${w.email}／登録 ${when(w.createdAt)}${w.notifiedAt ? `／お知らせ ${when(w.notifiedAt)}` : ''}` }),
+      el('span', { className: 'side row' }, el('span', { className: 'pill' + (w.status === 'notified' ? ' completed' : ''), textContent: w.status === 'notified' ? 'お知らせ済み' : '待っています' }), del));
+  }) : [empty('キャンセル待ちの登録はありません。')]));
+}
 async function loadList() {
+  loadWaitlist().catch(() => {});
   const data = await call('/api/admin/bookings?' + query($('listForm')));
   $('listCount').textContent = data.total > data.bookings.length
     ? `${data.total}件のうち、新しい順に${data.bookings.length}件を表示しています。条件を絞り込んでください。`

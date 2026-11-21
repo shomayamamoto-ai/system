@@ -466,3 +466,7 @@ dialog h2 { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .fctable td, .fctable th { white-space: nowrap; }
 .fctable tr.busy td { background: var(--bad-soft); }
 #fcCard .fctable { display: table; }
+
+/* キャンセル待ち */
+.waitbox { border-top: 1px dashed var(--line-strong); padding-top: 14px; }
+.waitbox .ghost { padding-left: 0; padding-right: 0; text-align: left; justify-content: flex-start; }

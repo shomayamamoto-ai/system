@@ -68,7 +68,7 @@ async function loadMonth() {
     if (mine !== monthRequest) return; // 古い応答は捨てる
     state.days = days;
     // 選んでいる日が予約できないときは、その月でいちばん近い空き日を選び直す
-    if (!days[state.date]) {
+    if (!days[state.date] && !(canWait() && days[state.date] === 0)) {
       state.date = Object.keys(days).sort().find((d) => days[d] > 0) || null;
       state.start = null;
     }
@@ -85,12 +85,13 @@ function drawMonth(first, last, days) {
   for (let d = first; d <= last; d = addDays(d, 1)) {
     const count = days ? days[d] : undefined;
     const mark = count === undefined ? '－' : count === 0 ? '×' : count <= 3 ? '△' : '○';
-    const word = count === undefined ? '受付期間外' : count === 0 ? '空きなし' : count <= 3 ? '残りわずか' : '空きあり';
-    const b = el('button', { type: 'button', disabled: !count, className: d === state.config.today ? 'today' : '' },
+    const word = count === undefined ? '受付なし' : count === 0 ? '空きなし' : count <= 3 ? '残りわずか' : '空きあり';
+    // 空きのない日も、キャンセル待ちができるときは選べるようにする
+    const b = el('button', { type: 'button', disabled: !count && !(canWait() && count === 0), className: d === state.config.today ? 'today' : '' },
       el('span', { textContent: String(Number(d.slice(8))) }),
       el('span', { className: 'mark' + (count > 0 && count <= 3 ? ' few' : ''), textContent: days ? mark : '…' }));
     b.setAttribute('aria-pressed', String(d === state.date));
-    b.setAttribute('aria-label', `${jp(d)} ${word}`);
+    b.setAttribute('aria-label', `${jp(d)} ${word}${count === 0 && canWait() ? '（キャンセル待ちができます）' : ''}`);
     const date = d;
     b.addEventListener('click', () => {
       state.date = date; state.start = null;
@@ -102,19 +103,71 @@ function drawMonth(first, last, days) {
   $('days').replaceChildren(...cells);
 }
 
+// ---------- キャンセル待ち ----------
+const canWait = () => Boolean(state.config && state.config.waitlist && !state.moving);
+function drawWaitBox(open, full) {
+  const box = $('waitBox');
+  box.hidden = !canWait() || !state.date;
+  if (box.hidden) return;
+  if (!open) {
+    const link = el('button', { type: 'button', className: 'ghost small', textContent: 'ご希望の時間が埋まっている場合は、キャンセル待ちに登録できます' });
+    link.addEventListener('click', () => drawWaitBox(true, false));
+    return box.replaceChildren(link);
+  }
+  const form = el('form', { className: 'stack-s' });
+  const part = el('select', { name: 'part' }, ...[['any', '終日（どの時間でもよい）'], ['am', '午前（12時まで）'], ['pm', '午後（12時から）']].map(([v, t]) => el('option', { value: v, textContent: t })));
+  const name = el('input', { name: 'customerName', required: true, maxLength: 80, autocomplete: 'name', value: $('customer').customerName.value });
+  const email = el('input', { name: 'email', type: 'email', inputMode: 'email', required: true, maxLength: 120, autocomplete: 'email', autocapitalize: 'off', value: $('customer').email.value });
+  const msg = el('p', { className: 'muted', role: 'status' });
+  const submit = el('button', { type: 'submit', className: 'primary', textContent: 'キャンセル待ちに登録する' });
+  form.append(
+    el('h3', { textContent: `${jp(state.date)}のキャンセル待ち` }),
+    el('p', { className: 'muted', textContent: (full ? 'この日は埋まっています。' : '') + '登録しておくと、空きが出たときにメールでお知らせします。お知らせは先着順のご案内で、予約は自動では確定しません。' }),
+    el('label', null, 'ご希望の時間帯', part), el('label', null, 'お名前（必須）', name), el('label', null, 'メールアドレス（必須）', email), submit, msg);
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    submit.disabled = true;
+    try {
+      const w = await call('/api/public/waitlist', { body: { serviceId: state.serviceId, staffId: state.staffId, date: state.date, part: part.value, customerName: name.value, email: email.value } });
+      box.replaceChildren(el('div', { className: 'msg ok', textContent: `${jp(w.date)}のキャンセル待ちを登録しました。空きが出たら、メールでお知らせします。確認のメールもお送りしました。` }));
+    } catch (e) { msg.textContent = e.message; submit.disabled = false; }
+  });
+  box.replaceChildren(form);
+}
+async function showWaitlist(id, token) {
+  const w = await call(`/api/public/waitlist?id=${encodeURIComponent(id)}&token=${encodeURIComponent(token)}`);
+  $('form').hidden = $('cta').hidden = true;
+  $('done').hidden = false;
+  const active = w.status === 'waiting';
+  $('doneTitle').textContent = active ? 'キャンセル待ちの登録' : w.status === 'notified' ? '空きのお知らせは送信済みです' : 'このキャンセル待ちは終了しています';
+  $('doneIcon').classList.toggle('off', !active);
+  $('doneMail').hidden = $('doneLinkBox').hidden = $('doneBlocked').hidden = true;
+  $('doneSummary').replaceChildren(...[['日付', `${jp(w.date)}（${w.part}）`], ['ご相談内容', w.serviceName], ['お名前', `${w.customerName} 様`]]
+    .flatMap(([k, v]) => [el('dt', { textContent: k }), el('dd', { textContent: v })]));
+  $('ics').hidden = $('gcal').hidden = $('change').hidden = true;
+  $('cancel').hidden = !active;
+  $('cancel').textContent = 'キャンセル待ちを取り消す';
+  $('cancel').onclick = async () => {
+    if (!confirm('キャンセル待ちの登録を取り消します。よろしいですか？')) return;
+    try { await call('/api/public/waitlist/cancel', { body: { id, token } }); await showWaitlist(id, token); showError(''); } catch (e) { showError(e.message); }
+  };
+}
+
 let slotRequest = 0;
 async function loadSlots() {
   const box = $('slots');
   const note = $('slotsNote');
   box.replaceChildren();
   $('slotTitle').textContent = state.date ? `${jp(state.date)}の空き時間` : '';
+  $('waitBox').hidden = true;
   if (!state.date) { note.textContent = 'この月は予約できる日がありません。「次の月」を押すか、別の担当者をお選びください。'; return; }
   note.textContent = '空き時間を確認しています…';
   const mine = ++slotRequest;
   try {
     const { slots } = await call(`/api/public/slots?date=${state.date}&serviceId=${state.serviceId}&staffId=${state.staffId}${own()}`);
     if (mine !== slotRequest) return;
-    note.textContent = slots.length ? '' : `${jp(state.date)}は予約できる時間がありません。別の日をお選びください。`;
+    note.textContent = slots.length ? '' : `${jp(state.date)}は予約できる時間がありません。${canWait() ? '' : '別の日をお選びください。'}`;
+    drawWaitBox(!slots.length, !slots.length);
     for (const [title, list] of [['午前', slots.filter((t) => t < '12:00')], ['午後', slots.filter((t) => t >= '12:00')]]) {
       if (!list.length) continue;
       const grid = el('div', { className: 'slots' });
@@ -249,6 +302,7 @@ $('customer').addEventListener('submit', async (ev) => {
     $('siteIntro').textContent = site.intro;
     $('siteIntro').hidden = !site.intro;
     $('foot').textContent = site.name;
+    if (q.get('wl') && q.get('token')) return showWaitlist(q.get('wl'), q.get('token'));
     if (q.get('id') && q.get('token')) {
       return showBooking(await call(`/api/public/booking?id=${encodeURIComponent(q.get('id'))}&token=${encodeURIComponent(q.get('token'))}`));
     }
@@ -263,6 +317,10 @@ $('customer').addEventListener('submit', async (ev) => {
     state.month = state.config.today.slice(0, 7);
     state.date = state.config.today;
     state.serviceId = state.config.services[0].id;
+    // 空きのお知らせメールのリンク（?date=…&service=…）から来たときは、その日とメニューを選んだ状態にする
+    const qd = q.get('date');
+    if (qd && /^\d{4}-\d{2}-\d{2}$/.test(qd) && qd >= state.config.today && qd <= lastDay()) { state.date = qd; state.month = qd.slice(0, 7); }
+    if (state.config.services.some((v) => v.id === q.get('service'))) state.serviceId = q.get('service');
     $('form').hidden = $('cta').hidden = false;
     render();
   } catch (e) {
