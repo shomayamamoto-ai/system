@@ -314,6 +314,7 @@ function summary(rows) {
   $('detailBody').replaceChildren(...rows.filter((r) => r[1]).flatMap(([k, v]) => [el('dt', { textContent: k }), el('dd', { textContent: v })]));
   $('detailExtra').hidden = true;
   $('memoBox').hidden = true;
+  $('mailBox').hidden = true;
 }
 const SOURCE = { web: '予約ページ', admin: '管理画面', import: 'CSV読み込み', sample: 'サンプル' };
 function openBooking(b) {
@@ -333,6 +334,25 @@ function openBooking(b) {
       if (inWeek) inWeek.memo = b.memo;
       $('memoSaved').textContent = '保存しました。';
     } catch (e) { $('memoSaved').textContent = e.message; }
+  };
+  // メールの記録
+  const MAIL = { confirm: '予約確認', change: '日時変更', cancel: 'キャンセル', remind: '前日リマインド', remind_today: '当日リマインド' };
+  const mails = b.mails || [];
+  const canMail = state.config.mail.enabled && b.email && ['web', 'admin'].includes(b.source);
+  $('mailBox').hidden = !mails.length && !canMail;
+  $('mailLog').textContent = mails.length
+    ? 'メールの記録: ' + mails.slice(-5).map((x) => `${when(x.at)} ${MAIL[x.kind] || x.kind}${x.retry ? '（送り直し）' : ''}${x.ok ? '' : '→失敗'}`).join('／')
+    : 'メールの記録: まだ送っていません。';
+  $('mailResend').hidden = !(canMail && b.status === 'booked');
+  $('mailResent').textContent = '';
+  $('mailResend').onclick = async () => {
+    $('mailResend').disabled = true;
+    try {
+      const fresh = await call(`/api/admin/bookings/${b.id}/mail`, 'POST', {});
+      b.mails = fresh.mails;
+      $('mailResent').textContent = '送りました。';
+    } catch (e) { $('mailResent').textContent = e.message; }
+    $('mailResend').disabled = false;
   };
   const actions = Object.keys(STATUS).filter((s) => s !== b.status).map((s) => {
     const btn = el('button', { className: 'small' + (s === 'cancelled' ? ' danger' : ''), textContent: `「${STATUS[s]}」にする` });
@@ -484,7 +504,7 @@ async function loadCustomers() {
 }
 function openCustomer(c) {
   $('detailTitle').textContent = `${c.name} 様`;
-  summary([['メール', c.email], ['電話', c.phone], ['予約回数', `${c.total}回（実施 ${c.completed}／キャンセル ${c.cancelled}／無断 ${c.noshow}）`]]);
+  summary([['メール', c.email], ['電話', c.phone], ['別の表記', (c.aliases || []).join('、')], ['予約回数', `${c.total}回（実施 ${c.completed}／キャンセル ${c.cancelled}／無断 ${c.noshow}）`]]);
   $('detailExtra').hidden = false;
   $('detailExtra').replaceChildren(...c.history.map((h) => el('div', null,
     el('div', { className: 'row' }, el('strong', { textContent: `${jpFull(h.date)} ${h.start}` }), pill(h.status)),
@@ -528,14 +548,21 @@ function bars(id, rows, valueText) {
   ]));
 }
 // 前の期間との差を「▲ 3件」「▼ 2pt」のような印で表す。upIsGood: 増えるのが良いことか（null は良し悪しなし）
-function delta(cur, prev, kind, hasPrev, upIsGood) {
-  if (!hasPrev || prev == null || cur == null) return [el('span', { className: 'delta', textContent: '比較なし' })];
+// sure が false のときは、差があっても「誤差の範囲」として色を付けない。range は「確からしい範囲」
+function delta(cur, prev, kind, hasPrev, upIsGood, sure, range) {
+  const extra = range ? [el('span', { className: 'prev', textContent: `確からしい範囲 ${pct(range[0])}〜${pct(range[1])}` })] : [];
+  if (!hasPrev || prev == null || cur == null) return [el('span', { className: 'delta', textContent: '比較なし' }), ...extra];
+  if (sure === false) {
+    const d0 = Math.round(cur * 100) - Math.round(prev * 100);
+    return [el('span', { className: 'delta', textContent: d0 === 0 ? '変わらず' : `${d0 > 0 ? '▲' : '▼'} ${Math.abs(d0)}pt・誤差の範囲` }),
+      el('span', { className: 'prev', textContent: `前の期間 ${pct(prev)}` }), ...extra];
+  }
   const diff = kind === 'rate' ? Math.round(cur * 100) - Math.round(prev * 100) : kind === 'days' ? Number((cur - prev).toFixed(1)) : cur - prev;
   const unit = { rate: 'pt', days: '日', count: '件' }[kind];
   const tone = diff === 0 || upIsGood == null ? '' : (diff > 0) === upIsGood ? ' good' : ' bad';
   const word = diff === 0 ? '変わらず' : `${diff > 0 ? '▲' : '▼'} ${Math.abs(diff)}${unit}`;
   const before = kind === 'rate' ? pct(prev) : kind === 'days' ? `${prev.toFixed(1)}日` : `${prev}件`;
-  return [el('span', { className: 'delta' + tone, textContent: word }), el('span', { className: 'prev', textContent: `前の期間 ${before}` })];
+  return [el('span', { className: 'delta' + tone, textContent: word }), el('span', { className: 'prev', textContent: `前の期間 ${before}` }), ...extra];
 }
 let rulesInfo = null;
 async function loadAnalytics() {
@@ -551,23 +578,27 @@ async function loadAnalytics() {
   $('kpis').replaceChildren(
     kpi('予約件数', String(t.total), '件', delta(t.total, p.total, 'count', has, true)),
     kpi('稼働率', String(Math.round(t.utilization * 100)), '%', delta(t.utilization, p.utilization, 'rate', has, true)),
-    kpi('キャンセル率', String(Math.round(t.cancelRate * 100)), '%', delta(t.cancelRate, p.cancelRate, 'rate', has, false)),
-    kpi('無断キャンセル率', String(Math.round(t.noshowRate * 100)), '%', delta(t.noshowRate, p.noshowRate, 'rate', has, false)),
+    kpi('キャンセル率', String(Math.round(t.cancelRate * 100)), '%', delta(t.cancelRate, p.cancelRate, 'rate', has, false, a.significant.cancelRate, t.total ? t.cancelRange : null)),
+    kpi('無断キャンセル率', String(Math.round(t.noshowRate * 100)), '%', delta(t.noshowRate, p.noshowRate, 'rate', has, false, a.significant.noshowRate, t.noshowBase ? t.noshowRange : null)),
     kpi('平均リードタイム', t.avgLeadDays == null ? '—' : t.avgLeadDays.toFixed(1), t.avgLeadDays == null ? '' : '日', delta(t.avgLeadDays, p.avgLeadDays, 'days', has, null)),
-    kpi('リピート率', t.customers ? String(Math.round(t.repeatRate * 100)) : '—', t.customers ? '%' : '', delta(t.repeatRate, p.repeatRate, 'rate', has && p.customers > 0, true)));
+    kpi('リピート率', t.customers ? String(Math.round(t.repeatRate * 100)) : '—', t.customers ? '%' : '', delta(t.repeatRate, p.repeatRate, 'rate', has && p.customers > 0, true, a.significant.repeatRate, t.customers ? t.repeatRange : null)));
 
   // 推移グラフ（積み上げ棒）
   const buckets = a.trend.buckets;
   const max = Math.max(1, ...buckets.map((b) => b.active + b.cancelled));
   const every = Math.ceil(buckets.length / (window.innerWidth < 760 ? 5 : 9)); // ラベルが重ならないよう間引く
   $('trendTitle').textContent = `予約件数の推移（${a.trend.unit}ごと）`;
-  $('trend').replaceChildren(...buckets.map((b, i) => el('div', { className: 'col', title: `${b.label}〜: 実施・予約中 ${b.active}件／キャンセル ${b.cancelled}件` },
+  $('trend').replaceChildren(...buckets.map((b, i) => el('div', { className: 'col' + (b.partial ? ' partial' : ''), title: `${b.label}〜${b.partial ? '（途中）' : ''}: 実施・予約中 ${b.active}件／キャンセル ${b.cancelled}件` },
     el('div', { textContent: buckets.length <= 14 ? String(b.active + b.cancelled) : '' }),
     el('div', { className: 'area' },
       el('div', { className: 'c', style: `height:${(b.cancelled / max) * 100}%` }),
       el('div', { className: 'a', style: `height:${(b.active / max) * 100}%` })),
   )));
   $('trendLabels').replaceChildren(...buckets.map((b, i) => el('span', { textContent: i % every === 0 ? b.label : '' })));
+  const u = a.trend.unit;
+  const words = { up: '増加傾向です', down: '減少傾向です', flat: 'はっきりした増減は見られません（ばらつきの範囲です）', unknown: `そろった${u}が6つ未満のため、増減の傾向はまだ判定できません` };
+  $('trendNote').textContent = `うすい色の棒は、期間の端で切れている、またはまだ終わっていない${u}です（途中の数字）。` +
+    `増減の傾向は、そろった${a.trend.fullCount}${u}分で判定しています: ${words[a.trend.direction]}。`;
   $('trend').setAttribute('role', 'img');
   $('trend').setAttribute('aria-label', `${a.trend.unit}ごとの予約件数。` + buckets.map((b) => `${b.label} ${b.active + b.cancelled}件`).join('、'));
 
@@ -582,6 +613,19 @@ async function loadAnalytics() {
   bars('chartHour', a.byHour.map((h) => ({ label: h.label, value: h.count })), (r) => `${r.value}件`);
   bars('chartStaff', a.byStaff.map((s) => ({ label: s.label, value: s.utilization, count: s.count })), (r) => `${pct(r.value)}・${r.count}件`);
   bars('chartService', a.byService.map((s) => ({ label: s.label, value: s.count })), (r) => `${r.value}件`);
+  // 曜日 × 時間帯の混み具合（数字も必ず表示し、色だけに頼らない）
+  const heat = a.heat;
+  $('heat').style.gridTemplateColumns = `3em repeat(${heat.hours.length}, minmax(34px, 1fr))`;
+  $('heat').replaceChildren(...(heat.rows.length ? [
+    el('span'), ...heat.hours.map((h) => el('span', { className: 'hh', textContent: `${h}時` })),
+    ...heat.rows.flatMap((r) => [el('span', { className: 'hw', textContent: r.label }),
+      ...r.cells.map((n, i) => {
+        const level = n === 0 ? 0 : Math.max(1, Math.ceil((n / heat.max) * 4));
+        const c = el('span', { className: `hc l${level}`, textContent: n || '' });
+        c.title = `${r.label}曜 ${heat.hours[i]}時台: ${n}件`;
+        return c;
+      })]),
+  ] : [el('p', { className: 'muted', textContent: 'データがありません。' })]));
 
   // 目安の数値の入力欄（割合は % に直して表示する）
   $('rulesBox').hidden = !isOwner();
@@ -675,6 +719,8 @@ function renderSettings() {
   $('setSlot').value = st.slotMinutes;
   $('setWindow').value = st.windowDays;
   $('setLead').value = st.minLeadMinutes;
+  $('setBuffer').value = st.bufferMinutes || 0;
+  $('setMaxPerDay').value = st.maxPerDay || 0;
   $('setReminder').checked = st.mail.reminder;
   $('setReminderHour').replaceChildren(...Array.from({ length: 24 }, (_, h) => el('option', { value: h, textContent: `${h}時` })));
   $('setReminderHour').value = st.mail.reminderHour;
@@ -741,18 +787,34 @@ function renderSettings() {
       el('label', { className: 'grow' }, 'メニュー名', input({ value: v.name, maxLength: 40 }, (x) => { v.name = x.value; })),
       el('label', { style: 'width:7.5em' }, '所要時間（分）', input({ type: 'number', inputMode: 'numeric', min: 5, max: 480, step: 5, value: v.minutes }, (x) => { v.minutes = Number(x.value); })),
       el('div', { style: 'align-self:end' }, remove(draft.services, i, v.name || 'メニュー'))),
-    el('label', null, '説明（任意。予約ページに表示されます）', input({ value: v.description || '', maxLength: 200 }, (x) => { v.description = x.value; })))));
+    el('label', null, '説明（任意。予約ページに表示されます）', input({ value: v.description || '', maxLength: 200 }, (x) => { v.description = x.value; })),
+    // 対応する担当者（全員にチェック＝だれでも対応できる）
+    el('div', null, el('div', { className: 'hours-head', textContent: 'このメニューに対応する担当者' }),
+      el('div', { className: 'row' }, ...draft.staff.filter((x) => x.id).map((x) => {
+        const all = !v.staffIds || !v.staffIds.length;
+        const box = el('input', { type: 'checkbox', checked: all || v.staffIds.includes(x.id) });
+        box.addEventListener('change', () => {
+          const ids = draft.staff.filter((y) => y.id);
+          const cur = new Set(all ? ids.map((y) => y.id) : v.staffIds);
+          if (box.checked) cur.add(x.id); else cur.delete(x.id);
+          if (!cur.size) { box.checked = true; return toast('対応する担当者は、1人以上必要です。'); }
+          v.staffIds = cur.size === ids.length ? [] : [...cur];
+          dirty(); renderSettings();
+        });
+        return el('label', { className: 'check' }, box, x.name || '（名前なし）');
+      }), draft.staff.some((x) => !x.id) ? el('span', { className: 'muted', textContent: '追加したばかりの担当者は、保存したあとに選べます。' }) : null)))));
 }
 // 画面上部の入力欄は、入力のたびに下書きへ写す（担当者欄などを描き直しても、入力が消えないようにする）
 const numOrKeep = (id) => ($(id).value.trim() === '' ? '' : Number($(id).value)); // 空欄なら、いまの値のままにする
 function readTopFields() {
   Object.assign(draft.settings, {
     slotMinutes: numOrKeep('setSlot'), windowDays: numOrKeep('setWindow'), minLeadMinutes: numOrKeep('setLead'),
+    bufferMinutes: numOrKeep('setBuffer'), maxPerDay: numOrKeep('setMaxPerDay'),
     site: { name: $('setName').value, intro: $('setIntro').value, cancelDeadlineHours: numOrKeep('setDeadline') },
     mail: { reminder: $('setReminder').checked, reminderHour: Number($('setReminderHour').value), notifyTo: $('setNotify').value.trim() },
   });
 }
-['setName', 'setIntro', 'setDeadline', 'setSlot', 'setWindow', 'setLead', 'setReminder', 'setReminderHour', 'setNotify']
+['setName', 'setIntro', 'setDeadline', 'setSlot', 'setWindow', 'setLead', 'setBuffer', 'setMaxPerDay', 'setReminder', 'setReminderHour', 'setNotify']
   .forEach((id) => $(id).addEventListener('input', () => { readTopFields(); dirty(); }));
 $('staffAdd').addEventListener('click', () => {
   draft.staff.push({ id: '', name: '', hours: [null, 1, 1, 1, 1, 1, null].map((x) => (x ? { start: '09:00', end: '18:00' } : null)) });

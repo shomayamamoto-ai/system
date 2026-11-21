@@ -146,11 +146,13 @@
     <p id="periodNote" class="muted"></p>
     <p id="printHead" class="printonly"></p>
     <div id="kpis" class="kpis"></div>
+    <p class="muted">「誤差の範囲」は、前の期間との差が偶然でも起こりうる大きさであることを表します。「確からしい範囲」は、件数から見て本当の割合が入っていそうな幅（95%）です。件数が少ないほど幅は広くなります。</p>
     <div class="card">
       <h3 id="trendTitle">予約件数の推移</h3>
       <p class="muted"><span class="key" style="background:var(--accent)"></span>実施・予約中　<span class="key" style="background:var(--gold-line)"></span>キャンセル</p>
       <div id="trend" class="trend"></div>
       <div id="trendLabels" class="trend-labels" aria-hidden="true"></div>
+      <p id="trendNote" class="muted" style="margin-top:10px"></p>
     </div>
     <h3 class="subhead">改善案（優先度の高い順）</h3>
     <div id="suggestions" class="stack"></div>
@@ -159,6 +161,11 @@
       <div class="card"><h3>時間帯別の予約件数</h3><p class="muted">開始時刻ごとの件数（キャンセルを除く）</p><div id="chartHour" class="bars"></div></div>
       <div class="card"><h3>担当者別の稼働率</h3><p class="muted">担当者ごとの埋まり具合</p><div id="chartStaff" class="bars"></div></div>
       <div class="card"><h3>メニュー別の予約件数</h3><p class="muted">キャンセルを含む申し込み件数</p><div id="chartService" class="bars"></div></div>
+    </div>
+    <div class="card">
+      <h3>曜日 × 時間帯の混み具合</h3>
+      <p class="muted">開始時刻ごとの予約件数（キャンセルを除く）。色が濃いほど予約が多い時間帯です。</p>
+      <div class="scroll-x"><div id="heat" class="heat"></div></div>
     </div>
     <details class="card" id="rulesBox">
       <summary>改善案を出す目安の数値を変更する</summary>
@@ -240,7 +247,9 @@
       <div class="fields">
         <label>予約枠の刻み（分）<input id="setSlot" type="number" inputmode="numeric" min="5" max="120" step="5"></label>
         <label>何日先まで受け付けるか<input id="setWindow" type="number" inputmode="numeric" min="1" max="365"></label>
-        <label>当日は何分前まで受け付けるか<input id="setLead" type="number" inputmode="numeric" min="0" max="10080" step="15"></label>
+        <label>何分前まで受け付けるか<input id="setLead" type="number" inputmode="numeric" min="0" max="10080" step="15"></label>
+        <label>予約の前後に空ける準備時間（分。0 でなし）<input id="setBuffer" type="number" inputmode="numeric" min="0" max="120" step="5"></label>
+        <label>担当者1人の1日の上限件数（0 で上限なし）<input id="setMaxPerDay" type="number" inputmode="numeric" min="0" max="50"></label>
       </div>
     </div>
     <div class="card stack">
@@ -310,6 +319,10 @@
     <h2 id="detailTitle"></h2>
     <dl class="summary" id="detailBody"></dl>
     <div id="detailExtra" class="history" hidden></div>
+    <div id="mailBox" class="stack-s" hidden>
+      <div class="muted" id="mailLog"></div>
+      <div class="row"><button type="button" id="mailResend" class="small">予約確認メールを送り直す</button><span id="mailResent" class="muted" aria-live="polite"></span></div>
+    </div>
     <form id="memoBox" class="stack-s" hidden>
       <label>面談メモ（お客様には表示されません）<textarea id="memoText" maxlength="2000" placeholder="面談の内容、次回までの宿題など"></textarea></label>
       <div class="row"><button type="submit" class="small">メモを保存</button><span id="memoSaved" class="muted" aria-live="polite"></span></div>

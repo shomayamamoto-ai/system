@@ -43,7 +43,11 @@ function render() {
   config.services.forEach((v) => choice($('services'), v.id === state.serviceId,
     () => { state.serviceId = v.id; state.start = null; render(); }, v.name, [`所要時間 ${v.minutes}分`, v.description].filter(Boolean).join('／')));
   $('staff').replaceChildren();
-  [{ id: 'any', name: '指名なし（おまかせ）' }].concat(config.staff)
+  // 選んだメニューに対応できる担当者だけを出す
+  const service = config.services.find((v) => v.id === state.serviceId);
+  const able = config.staff.filter((s) => !service || !service.staffIds || !service.staffIds.length || service.staffIds.includes(s.id));
+  if (state.staffId !== 'any' && !able.some((s) => s.id === state.staffId)) state.staffId = 'any';
+  [{ id: 'any', name: '指名なし（おまかせ）' }].concat(able)
     .forEach((s) => choice($('staff'), s.id === state.staffId, () => { state.staffId = s.id; state.start = null; render(); }, s.name));
   $('monthLabel').textContent = `${Number(state.month.slice(0, 4))}年${Number(state.month.slice(5, 7))}月`;
   $('prev').disabled = state.month <= config.today.slice(0, 7);

@@ -385,3 +385,49 @@ test('お試し状態は同じ機械からだけ。予約ページの悪用（�
     assert.equal((await post(3, { email: 'other@example.org' })).status, 201);
   } finally { s.close(); }
 });
+
+test('メールの送り直し: 失敗を記録し、時間をおいて自動で送り直す。手動でも送り直せる', async () => {
+  const sent = [];
+  let fail = true;
+  const mailer = { enabled: true, from: 'no-reply@example.com', send: async (m) => { if (fail) throw new Error('接続できません'); sent.push(m); } };
+  const s = await boot({ mailer, adminPassword: 'secret-pass' });
+  try {
+    const cookie = (await s.req('/api/admin/login', 'POST', { loginId: 'admin', password: 'secret-pass' })).headers.get('set-cookie').split(';')[0];
+    const tick = () => new Promise((r) => setTimeout(r, 20));
+    const date = core.addDays(core.nowJST().date, 3);
+    const made = await (await s.req('/api/admin/bookings', 'POST', { serviceId: 'v1', staffId: 's1', date, start: '21:00', customerName: '山田', email: 'yamada@example.com' }, { cookie })).json();
+    await tick();
+    const read = async () => (await (await s.req(`/api/admin/bookings?q=山田`, 'GET', null, { cookie })).json()).bookings[0];
+    assert.deepEqual((await read()).mails.map((x) => [x.kind, x.ok]), [['confirm', false]]);
+    assert.equal(JSON.parse(fs.readFileSync(s.dataFile, 'utf8')).outbox.length, 1);
+
+    // 10分たつ前は送り直さない。10分後に送り直し、成功したら待ち行列から消える
+    fail = false;
+    await s.server.runReminders(new Date(Date.now() + 5 * 60000));
+    assert.equal(sent.length, 0);
+    await s.server.runReminders(new Date(Date.now() + 11 * 60000));
+    assert.equal(sent.length, 1);
+    assert.match(sent[0].subject, /ご予約を受け付けました/);
+    assert.deepEqual((await read()).mails.map((x) => [x.kind, x.ok, Boolean(x.retry)]), [['confirm', false, false], ['confirm', true, true]]);
+    assert.equal(JSON.parse(fs.readFileSync(s.dataFile, 'utf8')).outbox.length, 0);
+
+    // 手動の送り直し（10分に3回まで）。お客様用の応答には、メールの記録を出さない
+    for (let i = 0; i < 3; i++) assert.equal((await s.req(`/api/admin/bookings/${made.id}/mail`, 'POST', {}, { cookie })).status, 200);
+    assert.equal((await s.req(`/api/admin/bookings/${made.id}/mail`, 'POST', {}, { cookie })).status, 429);
+    assert.equal(sent.length, 4);
+    const db = JSON.parse(fs.readFileSync(s.dataFile, 'utf8'));
+    const pub = await (await s.req(`/api/public/booking?id=${made.id}&token=${db.bookings[0].token}`)).text();
+    assert.ok(!pub.includes('mails'));
+
+    // 送り直しを待つ間にキャンセルされた予約には、「予約確認」を送らない
+    fail = true;
+    const other = await (await s.req('/api/admin/bookings', 'POST', { serviceId: 'v1', staffId: 's2', date, start: '21:00', customerName: '佐藤', email: 'sato@example.com' }, { cookie })).json();
+    await tick();
+    await s.req(`/api/admin/bookings/${other.id}`, 'PATCH', { status: 'cancelled' }, { cookie });
+    await tick();
+    fail = false;
+    const before = sent.length;
+    await s.server.runReminders(new Date(Date.now() + 11 * 60000));
+    assert.deepEqual(sent.slice(before).map((m) => m.subject.includes('キャンセル')), [true]); // キャンセルの知らせだけが届く
+  } finally { s.close(); }
+});

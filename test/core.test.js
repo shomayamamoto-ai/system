@@ -410,3 +410,150 @@ test('祝日: 内閣府が公表している日付と一致する', () => {
     assert.deepEqual(holidays(Number(year)).map((h) => h.date.slice(5)), list.split(' '), `${year}年`);
   }
 });
+
+test('統計: 確からしい範囲・差の判定・傾向の判定', () => {
+  const { wilson, ratesDiffer, trendOf } = require('../lib/stats');
+  const near = (a, b) => assert.ok(Math.abs(a - b) < 0.005, `${a} ≒ ${b}`);
+  // よく知られた値との照合（10件中3件 → 約 10.8%〜60.3%、100件中30件 → 約 21.9%〜39.6%）
+  near(wilson(3, 10)[0], 0.108); near(wilson(3, 10)[1], 0.603);
+  near(wilson(30, 100)[0], 0.219); near(wilson(30, 100)[1], 0.396);
+  assert.deepEqual(wilson(0, 0), [0, 1]);
+  near(wilson(0, 20)[0], 0); assert.ok(wilson(20, 20)[1] <= 1);
+  // 10件中3件と10件中5件の差は偶然の範囲。1000件中300件と500件の差は偶然とは言えない
+  assert.equal(ratesDiffer(3, 10, 5, 10), false);
+  assert.equal(ratesDiffer(300, 1000, 500, 1000), true);
+  assert.equal(ratesDiffer(0, 0, 5, 10), false);
+  assert.equal(ratesDiffer(0, 10, 0, 10), false);
+  // 傾向
+  assert.equal(trendOf([10, 12, 14, 16, 18, 20, 22]).direction, 'up');
+  assert.equal(trendOf([30, 27, 25, 22, 20, 17, 15, 12]).direction, 'down');
+  assert.equal(trendOf([20, 18, 23, 19, 22, 20, 21, 19]).direction, 'flat'); // ばらつきだけ
+  assert.equal(trendOf([10, 20, 30]).direction, 'unknown'); // 少なすぎる
+  assert.equal(trendOf([5, 5, 5, 5, 5, 5]).direction, 'flat');
+});
+
+test('分析の精度: 件数が少ないときは断定せず、十分あるときだけ「要対応」にする', () => {
+  const make = (n, cancelled) => {
+    const db = fresh();
+    let csv = '日付,開始,担当者,氏名,メール,ステータス\n';
+    for (let i = 0; i < n; i++) {
+      const d = core.addDays('2026-10-01', i % 40);
+      csv += `${d},${String(9 + (i % 8)).padStart(2, '0')}:${i % 2 ? '30' : '00'},担当者${i % 2 ? 'A' : 'B'},客${i},c${i}@example.com,${i < cancelled ? 'キャンセル' : '完了'}\n`;
+    }
+    core.importCsv(db, csv, NOW);
+    return analyze(db, '2026-10-01', '2026-11-15', NOW);
+  };
+  // 10件中2件（20%）: 目安15%は超えるが、範囲（約6〜51%）が目安をまたぐ → 断定しない
+  const few = make(10, 2);
+  const s1 = few.suggestions.find((s) => s.title.startsWith('キャンセル率'));
+  assert.equal(s1.level, 'idea');
+  assert.match(s1.title, /可能性/);
+  assert.match(s1.evidence, /断定はできません/);
+  // 200件中50件（25%）: 範囲の下限（約19%）でも目安を超える → 要対応
+  const many = make(200, 50);
+  const s2 = many.suggestions.find((s) => s.title.startsWith('キャンセル率'));
+  assert.equal(s2.level, 'warn');
+  assert.equal(s2.title, 'キャンセル率が高めです');
+  assert.ok(many.totals.cancelRange[0] > 0.15 && many.totals.cancelRange[1] < 0.32);
+  // 前の期間（データなし）との差は判定しない。混み具合の表の合計は、有効な予約の件数と一致する
+  assert.equal(many.significant.cancelRate, false);
+  assert.equal(many.heat.rows.flatMap((r) => r.cells).reduce((a, b) => a + b, 0), many.totals.active);
+  // 推移: 期間の端で切れている週は「途中」になる（10/1 は木曜、11/15 は日曜）
+  const b = many.trend.buckets;
+  assert.equal(b[0].partial, true);
+  assert.equal(b.at(-1).partial, false);
+  assert.equal(many.trend.fullCount, b.filter((x) => !x.partial).length);
+});
+
+test('空き枠の精度: 準備時間・1日の上限・メニューごとの担当者', () => {
+  let db = fresh();
+  db.settings.bufferMinutes = 30;
+  book(db); // 火曜 10:00〜11:00 担当者A
+  const t = () => core.freeSlots(db, { date: '2026-11-17', serviceId: 'v2', staffId: 's1' }, NOW).map((s) => s.start);
+  for (const x of ['09:00', '09:30', '10:00', '10:30', '11:00']) assert.ok(!t().includes(x), x); // 前後30分も空ける
+  assert.ok(t().includes('11:30'));
+  assert.ok(!core.freeSlots(db, { date: '2026-11-17', serviceId: 'v1', staffId: 's1' }, NOW).map((s) => s.start).includes('09:30'));
+  assert.ok(core.freeSlots(db, { date: '2026-11-17', serviceId: 'v1', staffId: 's1' }, NOW).map((s) => s.start).includes('09:00')); // 30分の相談なら 9:00〜9:30 は可
+  // 管理画面からなら、準備時間に関係なく登録できる
+  core.createBooking(db, { serviceId: 'v1', staffId: 's1', date: '2026-11-17', start: '11:00', customerName: '急ぎ' }, NOW, { admin: true });
+  // 自分の予約の前後は、日時変更のときは空きとして扱う
+  const mine = db.bookings[0];
+  assert.ok(core.freeSlots(db, { date: '2026-11-17', serviceId: 'v2', staffId: 's1', exceptBookingId: mine.id }, NOW).map((s) => s.start).includes('09:00'));
+
+  db = fresh();
+  db.settings.maxPerDay = 2;
+  book(db, { start: '09:00' });
+  book(db, { start: '13:00', email: 'b@example.com' });
+  assert.deepEqual(core.freeSlots(db, { date: '2026-11-17', serviceId: 'v1', staffId: 's1' }, NOW), []); // 上限に達した
+  assert.ok(core.freeSlots(db, { date: '2026-11-17', serviceId: 'v1', staffId: 'any' }, NOW).length > 0); // 担当者Bは受けられる
+  assert.ok(core.freeSlots(db, { date: '2026-11-18', serviceId: 'v1', staffId: 's1' }, NOW).length > 0); // 翌日は別
+  assert.throws(() => book(db, { start: '15:00', email: 'c@example.com' }), /埋まっています/);
+
+  db = fresh();
+  core.updateConfig(db, { staff: db.staff, services: [db.services[0], Object.assign({}, db.services[1], { staffIds: ['s2', 'nobody'] })] });
+  assert.deepEqual(db.services[1].staffIds, ['s2']);
+  assert.deepEqual(core.freeSlots(db, { date: '2026-11-17', serviceId: 'v2', staffId: 's1' }, NOW), []);
+  assert.throws(() => book(db), /埋まっています/); // 対応していない担当者は指名できない
+  assert.equal(book(db, { staffId: 'any' }).staffId, 's2');
+  assert.equal(book(db, { serviceId: 'v1', start: '15:00' }).staffId, 's1'); // 制限のないメニューは従来どおり
+  // 全員を選んだ場合は「制限なし」として保存する。担当できる人が0人になる変更は止める
+  core.updateConfig(db, { staff: db.staff, services: [db.services[0], Object.assign({}, db.services[1], { staffIds: ['s1', 's2'] })] });
+  assert.deepEqual(db.services[1].staffIds, []);
+  assert.throws(() => core.updateConfig(db, { staff: db.staff, services: [db.services[0], Object.assign({}, db.services[1], { staffIds: ['gone'] })] }), /担当できる人がいなくなります/);
+});
+
+test('名寄せ: 表記が違っても同じお客様は1人として数える', () => {
+  const id = require('../lib/identity');
+  assert.equal(id.normEmail(' Ｔaro@Example.COM '), 'taro@example.com');
+  assert.equal(id.normPhone('０９０-1234-5678'), '09012345678');
+  assert.equal(id.normPhone('+81 90 1234 5678'), '09012345678');
+  assert.equal(id.normPhone('内線123'), '');
+  assert.equal(id.normName('山田　太郎'), id.normName('山田 太郎'));
+
+  const db = fresh();
+  book(db, { customerName: '山田 太郎', email: 'Taro@Example.com', phone: '090-1234-5678' });
+  book(db, { start: '13:00', customerName: '山田　太郎', email: 'taro@example.com' });           // メールの大文字小文字
+  book(db, { start: '15:00', customerName: 'ヤマダ タロウ', email: 'other@example.com', phone: '09012345678' }); // 電話番号で同一人物
+  book(db, { date: '2026-11-18', customerName: '佐藤', email: 'sato@example.com', phone: '03-1111-2222' });
+  core.createBooking(db, { serviceId: 'v1', staffId: 's2', date: '2026-11-18', start: '20:00', customerName: '田中　花子' }, NOW, { admin: true });
+  core.createBooking(db, { serviceId: 'v1', staffId: 's2', date: '2026-11-19', start: '20:00', customerName: '田中 花子' }, NOW, { admin: true }); // 連絡先なしは名前で
+  const { customers, total } = core.customers(db);
+  assert.equal(total, 3);
+  const yamada = customers.find((c) => c.total === 3);
+  assert.deepEqual([yamada.name, yamada.phone], ['ヤマダ タロウ', '09012345678']);
+  assert.ok(yamada.aliases.length >= 1);
+  assert.equal(customers.find((c) => c.name === '田中 花子').total, 2);
+  assert.equal(core.customers(db, '090 1234').total, 1); // 電話番号は、区切り方が違っても探せる
+  assert.equal(core.customers(db, '山田太郎').total, 1);
+  // リピート率も名寄せ後の人数で計算する（3人中2人が2回以上）
+  const a = analyze(db, '2026-11-16', '2026-11-30', NOW);
+  assert.deepEqual([a.totals.customers, a.totals.repeaters], [3, 2]);
+  // 同じメールアドレスでの予約上限も、表記をそろえて数える
+  book(db, { date: '2026-11-19', email: 'ｔａｒｏ@example.com' }); // 全角で入力されても同じアドレスとして数える（これで3件目）
+  assert.equal(db.bookings.at(-1).email, 'taro@example.com');
+  assert.throws(() => book(db, { date: '2026-11-20', email: 'TARO@EXAMPLE.COM' }), /同時に3件まで/);
+});
+
+test('メールの精度: 送りそこねたリマインドは当日に送り直し、意味のなくなったメールは送らない', () => {
+  const { dueReminders, dueCatchUp, stillRelevant, buildMail } = require('../lib/mailer');
+  const db = fresh();
+  const b = book(db); // 11/17（火）10:00
+  b.createdAt = '2026-11-10T00:00:00.000Z';
+  const morning = new Date('2026-11-16T23:30:00Z'); // 日本時間 11/17 8:30（前日はサーバーが止まっていた想定）
+  assert.deepEqual(dueReminders(db, morning), []);
+  assert.deepEqual(dueCatchUp(db, morning).map((x) => x.id), [b.id]);
+  assert.match(buildMail('remind_today', db, b, '').subject, /本日のご予約/);
+  assert.deepEqual(dueCatchUp(db, new Date('2026-11-17T00:30:00Z')), []); // 9:30: 面談まで1時間を切ったら送らない
+  b.remindedAt = 'x';
+  assert.deepEqual(dueCatchUp(db, morning), []); // 送信済みなら送らない
+  delete b.remindedAt;
+  b.createdAt = '2026-11-16T10:00:00.000Z'; // 前日の19時（送信時刻のあと）に入った予約は対象外
+  assert.deepEqual(dueCatchUp(db, morning), []);
+
+  assert.equal(stillRelevant('confirm', b, morning), true);
+  assert.equal(stillRelevant('cancel', b, morning), false);
+  core.setBookingStatus(db, b.id, 'cancelled', NOW);
+  assert.equal(stillRelevant('confirm', b, morning), false); // キャンセル後に「予約確認」は送らない
+  assert.equal(stillRelevant('cancel', b, morning), true);
+  assert.equal(stillRelevant('cancel', b, new Date('2026-11-20T00:00:00Z')), false); // 日付を過ぎたら送らない
+});

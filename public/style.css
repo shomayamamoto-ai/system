@@ -431,3 +431,15 @@ dialog h2 { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
 .toolbar button { white-space: nowrap; }
+
+/* 推移グラフ: 途中の週（月）はうすく表示する */
+.trend .col.partial .a, .trend .col.partial .c { opacity: .4; }
+/* 曜日 × 時間帯の混み具合（color-mix が使えない古いブラウザ向けに、先に代わりの色を指定している） */
+.scroll-x { overflow-x: auto; }
+.heat { display: grid; gap: 3px; min-width: 420px; margin-top: 12px; font-size: .78rem; font-variant-numeric: tabular-nums; }
+.heat .hh, .heat .hw { color: var(--muted); text-align: center; align-self: center; }
+.heat .hc { min-height: 30px; display: grid; place-items: center; border-radius: 3px; background: var(--surface-2); color: var(--text); }
+.heat .l1 { background: var(--accent-soft); background: color-mix(in srgb, var(--accent) 18%, var(--surface)); }
+.heat .l2 { background: var(--accent-soft); background: color-mix(in srgb, var(--accent) 40%, var(--surface)); }
+.heat .l3 { background: var(--accent); background: color-mix(in srgb, var(--accent) 68%, var(--surface)); color: var(--accent-text); }
+.heat .l4 { background: var(--accent); color: var(--accent-text); font-weight: 700; }

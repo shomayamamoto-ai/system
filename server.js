@@ -11,7 +11,7 @@ const crypto = require('node:crypto');
 const core = require('./lib/core');
 const auth = require('./lib/auth');
 const { analyze, updateRules } = require('./lib/analytics');
-const { createMailer, buildMail, buildStaffMail, dueReminders } = require('./lib/mailer');
+const { createMailer, buildMail, buildStaffMail, dueReminders, dueCatchUp, stillRelevant } = require('./lib/mailer');
 
 const { AppError } = core;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -62,6 +62,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
   const allowBooking = limiter(L.booking, 10 * 60 * 1000); // 予約・変更・キャンセル: 10分に10回まで
   const loginByIp = failLimiter(L.login, 15 * 60 * 1000);         // ログインの失敗: 同じ接続元から15分に8回まで
   const loginById = failLimiter(L.loginId || 20, 15 * 60 * 1000); // 同じログインIDでの失敗: 15分に20回まで
+  const allowResend = limiter(3, 10 * 60 * 1000);          // メールの送り直し: 同じ予約へ10分に3回まで
   const allowExportLog = limiter(1, 60 * 1000);            // 書き出しの履歴は、1人につき1分に1行まで
   // ログイン失敗は1件ずつ残さず、10分ごとに回数をまとめて1行にする（履歴を失敗で埋めつくされないため）
   let failRow = null;
@@ -127,19 +128,40 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
 
   // ----- メール -----
   let lastMailError = 0;
-  async function sendMail(kind, b) {
+  const RETRY_AFTER_MIN = [10, 60, 360]; // 失敗したメールは、10分後・1時間後・6時間後に送り直す（3回まで）
+  // 予約ごとに「いつ・何を送ったか」を残す（直近20件）
+  function logMail(b, kind, ok, retry) {
+    if (!Array.isArray(b.mails)) b.mails = [];
+    b.mails.push({ at: new Date().toISOString(), kind, ok, retry: retry || undefined });
+    if (b.mails.length > 20) b.mails.splice(0, b.mails.length - 20);
+  }
+  async function sendMail(kind, b, opts = {}) {
     if (!mail.enabled || !b.email || !['web', 'admin'].includes(b.source)) return false;
+    const d = db();
     try {
-      await mail.send(buildMail(kind, db(), b, publicUrl));
+      await mail.send(buildMail(kind, d, b, publicUrl));
+      logMail(b, kind, true, opts.retry);
+      d.outbox = d.outbox.filter((o) => o.bookingId !== b.id); // 新しいメールが届いたら、古い送り直しは不要
+      store.save();
       return true;
     } catch (err) {
       console.error('メール送信に失敗:', err.message);
+      logMail(b, kind, false, opts.retry);
+      // 予約確認・変更・キャンセルは、あとで送り直す（リマインドは次の確認のときにもう一度試す）
+      if (['confirm', 'change', 'cancel'].includes(kind)) {
+        const attempts = (opts.attempts || 0) + 1;
+        d.outbox = d.outbox.filter((o) => o.bookingId !== b.id);
+        if (attempts <= RETRY_AFTER_MIN.length) {
+          d.outbox.push({ bookingId: b.id, kind, attempts, nextAt: Date.now() + RETRY_AFTER_MIN[attempts - 1] * 60000 });
+        }
+      }
       if (Date.now() - lastMailError > 3600 * 1000) { // 同じ知らせが並ばないよう、1時間に1回まで
         lastMailError = Date.now();
-        core.notify(db(), 'mail_error', 'メールを送れませんでした',
-          `${b.customerName} 様あてのメール送信に失敗しました。設定タブでメールの設定を確認してください。（${String(err.message).slice(0, 120)}）`);
-        store.save();
+        core.notify(d, 'mail_error', 'メールを送れませんでした',
+          `${b.customerName} 様あてのメール送信に失敗しました。時間をおいて自動で送り直します。続く場合は、設定でメールの設定を確認してください。（${String(err.message).slice(0, 120)}）`);
       }
+      store.save();
+      if (opts.rethrow) throw err;
       return false;
     }
   }
@@ -149,13 +171,22 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     if (!mail.enabled || !db().settings.mail.notifyTo) return;
     mail.send(buildStaffMail(kind, db(), b, publicUrl)).catch((err) => console.error('担当者あてメールの送信に失敗:', err.message));
   };
+  // 定期的に行うメールの仕事: 失敗したメールの送り直し → 前日リマインド → 送りそこねた分の当日リマインド
   async function runReminders(now = new Date()) {
     if (!mail.enabled) return 0;
-    let sent = 0;
-    for (const b of dueReminders(db(), now)) {
-      if (await sendMail('remind', b)) { b.remindedAt = now.toISOString(); sent++; }
+    const d = db();
+    for (const o of d.outbox.filter((x) => x.nextAt <= now.getTime())) {
+      const b = d.bookings.find((x) => x.id === o.bookingId);
+      d.outbox = d.outbox.filter((x) => x !== o);
+      if (stillRelevant(o.kind, b, now)) await sendMail(o.kind, b, { retry: true, attempts: o.attempts });
     }
-    if (sent) store.save();
+    let sent = 0;
+    for (const [kind, list] of [['remind', dueReminders(d, now)], ['remind_today', dueCatchUp(d, now)]]) {
+      for (const b of list) {
+        if (await sendMail(kind, b)) { b.remindedAt = now.toISOString(); sent++; }
+      }
+    }
+    store.save();
     return sent;
   }
 
@@ -334,6 +365,24 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
         log('予約の日時を変更', say(b));
         mailLater('change', b);
       }
+      store.save();
+      return send(res, 200, adminBooking(b));
+    }
+    match = /^\/api\/admin\/bookings\/([\w-]+)\/mail$/.exec(p);
+    if (m === 'POST' && match) { // 予約確認メールを、手動で送り直す
+      const b = d.bookings.find((x) => x.id === match[1]);
+      if (!b) throw new AppError('予約が見つかりません。', 404);
+      if (!mail.enabled) throw new AppError('メール送信が設定されていません。');
+      if (!b.email) throw new AppError('この予約には、メールアドレスが登録されていません。');
+      if (b.status !== 'booked') throw new AppError('送り直せるのは「予約済」の予約だけです。', 409);
+      if (!['web', 'admin'].includes(b.source)) throw new AppError('CSVで読み込んだ予約とサンプルには、メールを送れません。', 409);
+      if (!allowResend(b.id)) throw new AppError('同じ予約への送り直しは、10分に3回までです。', 429);
+      try {
+        await sendMail('confirm', b, { retry: true, rethrow: true, attempts: RETRY_AFTER_MIN.length });
+      } catch (err) {
+        throw new AppError(`送信できませんでした。メールの設定を確認してください。（${String(err.message).slice(0, 160)}）`, 502);
+      }
+      log('予約確認メールを送り直し', say(b));
       store.save();
       return send(res, 200, adminBooking(b));
     }
