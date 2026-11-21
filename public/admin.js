@@ -346,6 +346,7 @@ function summary(rows) {
   $('detailBody').replaceChildren(...rows.filter((r) => r[1]).flatMap(([k, v]) => [el('dt', { textContent: k }), el('dd', { textContent: v })]));
   $('detailExtra').hidden = true;
   $('memoBox').hidden = true;
+  $('actualBox').hidden = true;
   $('mailBox').hidden = true;
 }
 const SOURCE = { web: '予約ページ', admin: '管理画面', import: 'CSV読み込み', sample: 'サンプル' };
@@ -354,6 +355,33 @@ function openBooking(b) {
   summary([['日時', `${jp(b.date)} ${b.start}〜${b.end}`], ['メニュー', serviceName(b.serviceId)], ['担当者', staffName(b.staffId)],
     ['お名前', `${b.customerName} 様`], ['メール', b.email], ['電話', b.phone], ['相談内容', b.note],
     ...(b.answers || []).map((a) => [a.label, a.value]), ['状態', STATUS[b.status]], ['登録元', SOURCE[b.source]]]);
+  // 実際の面談時間
+  const hhmm = (m) => (m == null ? '' : `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`);
+  const nowHM = () => new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date());
+  $('actualBox').hidden = !['booked', 'completed'].includes(b.status) || b.date > state.config.today;
+  $('actStart').value = hhmm(b.actualStart);
+  $('actEnd').value = hhmm(b.actualEnd);
+  $('actSaved').textContent = '';
+  const saveActual = async () => {
+    try {
+      const fresh = await call(`/api/admin/bookings/${b.id}`, 'PATCH', { actual: { start: $('actStart').value, end: $('actEnd').value } });
+      const changed = fresh.status !== b.status;
+      Object.assign(b, { actualStart: fresh.actualStart, actualEnd: fresh.actualEnd, status: fresh.status });
+      const toM = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+      const plan = toM(b.end) - toM(b.start);
+      const diff = b.actualEnd != null ? (b.actualEnd - b.actualStart) - plan : null;
+      $('actSaved').textContent = b.actualStart == null ? '記録を消しました。'
+        : diff == null ? '開始を記録しました。' : `記録しました（予定より${diff === 0 ? 'ちょうど' : diff > 0 ? `${diff}分長い` : `${-diff}分短い`}）。`;
+      if (changed) { toast('面談が終わったので「完了」にしました。'); refresh(); }
+    } catch (e) { $('actSaved').textContent = e.message; }
+  };
+  $('actualBox').onsubmit = (ev) => { ev.preventDefault(); saveActual(); };
+  $('actNowStart').onclick = () => { $('actStart').value = nowHM(); saveActual(); };
+  $('actNowEnd').onclick = () => {
+    if (!$('actStart').value) $('actStart').value = b.start; // 開始を押し忘れたときは、予定の開始時刻で記録する
+    $('actEnd').value = nowHM();
+    saveActual();
+  };
   $('memoBox').hidden = false;
   $('memoText').value = b.memo || '';
   $('memoSaved').textContent = '';
@@ -674,6 +702,16 @@ async function loadAnalytics() {
     el('span', { className: 'sub', textContent: `予約 ${Math.round(x.booked / 6) / 10}時間／受付できる時間 ${Math.round(x.capacity / 6) / 10}時間` }),
     el('span', { className: 'side' }, el('span', { className: 'pill noshow', textContent: `稼働 ${pct(x.rate)}` })))) : []));
   $('loadDays').hidden = !L.overList.length;
+  // 実績で見た延長と遅れ
+  const A = a.actuals;
+  $('actualSummary').replaceChildren(el('p', { className: A.n ? '' : 'muted' }, A.n
+    ? `実際の時間を記録した面談は ${A.n}件です。予定より長くなった時間は平均 ${A.avgOverrun.toFixed(1)}分で、${pct(A.overrunShare)}が5分以上延びました（4件に3件は ${A.p75Overrun}分以内）。前の面談の延長で次の開始が遅れたことが ${A.chained}回${A.chained ? `（平均 ${A.avgChained.toFixed(1)}分）` : ''}ありました。`
+    : 'まだ記録がありません。予約の詳細で「いま開始」「いま終了」を押すと記録でき、ここに延長と遅れの実績が出ます。'));
+  $('actualTable').replaceChildren(...(A.n ? [
+    el('tr', null, el('th', { textContent: 'その日の稼働率' }), ...A.byLoad.map((x) => el('th', { className: x.key === 'high' ? 'hot' : '', textContent: x.label }))),
+    el('tr', null, el('td', { textContent: '開始の遅れ（平均）' }), ...A.byLoad.map((x) => el('td', { className: x.key === 'high' ? 'hot' : '', textContent: x.n ? `${x.avgLate.toFixed(1)}分` : '—' }))),
+    el('tr', null, el('td', { textContent: '記録した件数' }), ...A.byLoad.map((x) => el('td', { textContent: `${x.n}件` }))),
+  ] : []));
 
   // 目安の数値の入力欄（割合は % に直して表示する）
   $('rulesBox').hidden = !isOwner();

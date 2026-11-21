@@ -690,3 +690,67 @@ test('特定の日の受付時間: 変更・休み・休業日の特別営業が
   core.updateConfig(db, { staff: [db.staff[1]], services: db.services });
   assert.deepEqual(db.overrides, []);
 });
+
+test('実際の面談時間: 記録すると完了になり、延長と遅れの連鎖を数える', () => {
+  const db = fresh();
+  const later = new Date('2026-11-17T12:00:00Z'); // 面談の日（11/17）の夜
+  const a = book(db, { start: '10:00' }); // 60分 10:00〜11:00
+  const b = book(db, { start: '11:00', email: 'b@example.com' });
+  const c = book(db, { start: '14:00', email: 'c@example.com' });
+  assert.throws(() => core.setActual(db, a.id, { start: '10:00' }, NOW), /まだ来ていない日/);
+  core.setActual(db, a.id, { start: '10:05', end: '11:20' }, later); // 15分延長し、11:00 の予約に20分食い込んだ
+  assert.equal(a.status, 'completed');
+  core.setActual(db, b.id, { start: '11:20', end: '12:20' }, later);
+  core.setActual(db, c.id, { start: '14:00', end: '15:00' }, later);
+  assert.throws(() => core.setActual(db, c.id, { start: '15:00', end: '14:00' }, later), /後にしてください/);
+  assert.throws(() => core.setActual(db, c.id, { end: '15:00' }, later), /開始時刻も/);
+  core.setBookingStatus(db, c.id, 'booked', later);
+  core.setActual(db, c.id, { start: '14:00' }, later); // 開始だけ記録しても、まだ完了にはしない
+  assert.equal(c.status, 'booked');
+  core.setActual(db, c.id, { start: '14:00', end: '15:00' }, later);
+
+  const r = analyze(db, '2026-11-17', '2026-11-17', later);
+  assert.equal(r.actuals.n, 3);
+  assert.equal(r.actuals.chained, 1); // a の延長で b が遅れた
+  assert.equal(r.actuals.avgChained, 20);
+  assert.equal(Math.round(r.actuals.avgOverrun * 10) / 10, 5); // (15 + 0 + 0) / 3
+  // CSV の書き出し → 読み込みで、実際の時間も引き継がれる
+  const copy = fresh();
+  core.importCsv(copy, core.exportCsv(db), later);
+  const back = copy.bookings.find((x) => x.start === 600);
+  assert.deepEqual([back.actualStart, back.actualEnd], [605, 680]);
+  // 記録の取り消し
+  core.setActual(db, a.id, { start: '', end: '' }, later);
+  assert.equal(a.actualStart, undefined);
+});
+
+test('実際の面談時間: 延長が多いと準備時間を提案し、詰めた日ほど遅れる実績を示す', () => {
+  const db = fresh();
+  db.settings.loadCap = 100;
+  const later = new Date('2026-12-20T00:00:00Z');
+  let csv = '日付,開始,メニュー,担当者,氏名,メール,ステータス,実際の開始,実際の終了\n';
+  const hm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  // 余裕のある日（3件・稼働率約33%）: 予定どおり。詰めた日（8件・約89%）: 毎回10分延び、遅れが連鎖する
+  ['2026-12-01', '2026-12-03', '2026-12-08'].forEach((d, k) => {
+    for (let i = 0; i < 3; i++) { const s = 540 + i * 120; csv += `${d},${hm(s)},個別面談（60分）,担当者A,余${k}${i},y${k}${i}@example.com,完了,${hm(s)},${hm(s + 60)}\n`; }
+  });
+  ['2026-12-02', '2026-12-04', '2026-12-09'].forEach((d, k) => {
+    let t = 540;
+    for (let i = 0; i < 8; i++) {
+      const s = 540 + i * 60;
+      const st = Math.max(s, t);
+      csv += `${d},${hm(s)},個別面談（60分）,担当者A,詰${k}${i},z${k}${i}@example.com,完了,${hm(st)},${hm(st + 70)}\n`;
+      t = st + 70;
+    }
+  });
+  core.importCsv(db, csv, later);
+  const r = analyze(db, '2026-12-01', '2026-12-09', later);
+  const lo = r.actuals.byLoad.find((x) => x.key === 'low');
+  const hi = r.actuals.byLoad.find((x) => x.key === 'high');
+  assert.equal(lo.avgLate, 0);
+  assert.ok(hi.avgLate > 20);
+  assert.equal(r.actuals.chained, 21); // 詰めた日 3日 × 7回
+  const s1 = r.suggestions.find((x) => x.title === '面談が予定より延びることが多いようです');
+  assert.match(s1.action, /10分にすると/);
+  assert.ok(r.suggestions.some((x) => x.title === '予定を詰めた日ほど、開始が遅れています（実績）'));
+});

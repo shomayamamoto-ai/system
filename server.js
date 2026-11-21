@@ -374,7 +374,10 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     if (m === 'PATCH' && match) {
       const body = await readBody(req);
       let b;
-      if (typeof body.memo === 'string') {
+      if (body.actual && typeof body.actual === 'object') {
+        b = core.setActual(d, match[1], body.actual);
+        log('実際の面談時間を記録', `${say(b)}${b.actualStart == null ? '（取り消し）' : `→ 実際 ${core.toHM(b.actualStart)}〜${b.actualEnd == null ? '' : core.toHM(b.actualEnd)}`}`);
+      } else if (typeof body.memo === 'string') {
         b = core.setMemo(d, match[1], body.memo);
         log('面談メモを保存', say(b));
       } else if (body.status) {

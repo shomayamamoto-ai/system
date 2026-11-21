@@ -173,6 +173,9 @@
         予約は時間が決まっているため、実際の遅れはこの式どおりにはなりません。8割を超えると急に悪化する、という傾向をつかむための目安としてご覧ください。
       </p>
       <div id="loadDays" class="rows"></div>
+      <h3 class="subhead" style="margin-top:12px!important">実績で見た延長と遅れ</h3>
+      <div id="actualSummary"></div>
+      <div class="scroll-x"><table id="actualTable" class="qtable"></table></div>
     </div>
     <div class="card">
       <h3>曜日 × 時間帯の混み具合</h3>
@@ -367,6 +370,19 @@
       <div class="muted" id="mailLog"></div>
       <div class="row"><button type="button" id="mailResend" class="small">予約確認メールを送り直す</button><span id="mailResent" class="muted" aria-live="polite"></span></div>
     </div>
+    <form id="actualBox" class="stack-s" hidden>
+      <div class="hours-head">実際の面談時間（延長や遅れの分析に使います。お客様には表示されません）</div>
+      <div class="row">
+        <label class="grow">開始<input id="actStart" type="time"></label>
+        <label class="grow">終了<input id="actEnd" type="time"></label>
+      </div>
+      <div class="row">
+        <button type="button" id="actNowStart" class="small">いま開始</button>
+        <button type="button" id="actNowEnd" class="small">いま終了</button>
+        <button type="submit" class="small">記録する</button>
+        <span id="actSaved" class="muted" aria-live="polite"></span>
+      </div>
+    </form>
     <form id="memoBox" class="stack-s" hidden>
       <label>面談メモ（お客様には表示されません）<textarea id="memoText" maxlength="2000" placeholder="面談の内容、次回までの宿題など"></textarea></label>
       <div class="row"><button type="submit" class="small">メモを保存</button><span id="memoSaved" class="muted" aria-live="polite"></span></div>
