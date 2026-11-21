@@ -654,7 +654,8 @@ async function loadForecast() {
   const acc = f.accuracy;
   $('fcSummary').replaceChildren(el('p', null,
     busy.length ? el('strong', { textContent: `混む見込みの日が ${busy.length}日あります（見込み稼働率が${f.cap}%を超える日）。` }) : `見込み稼働率が${f.cap}%を超える日はありません。`,
-    acc ? ` 過去${acc.days}日ぶんを同じ方法で予測してみると、1日あたりの誤差は平均 ±${acc.mae.toFixed(1)}件でした（曜日を区別しない予測では ±${acc.baseline.toFixed(1)}件）。` : ' 予測の当たり具合を確かめるには、もう少し過去の実績が必要です。'));
+    acc ? ` 過去4週間を、面談日の1・3・7日前の時点から${acc.trials}回予測し直したところ、1日あたりの誤差は「曜日の平均」で ±${acc.mean.toFixed(2)}件、「予約の入り方も使う方法」で ±${acc.pace.toFixed(2)}件でした。いまは誤差が小さい${f.method === 'pace' ? '「予約の入り方も使う方法」' : '「曜日の平均」'}で見込んでいます。` : ' 予測の当たり具合を確かめるには、もう少し過去の実績が必要です。',
+    f.trend === 'up' ? ' 週ごとの予約は増加傾向で、その分を見込みに足しています。' : f.trend === 'down' ? ' 週ごとの予約は減少傾向で、その分を見込みから引いています。' : ''));
   const tag = (d) => (!d.enough ? el('span', { className: 'muted', textContent: '実績不足' })
     : d.level === 'busy' ? el('span', { className: 'pill noshow', textContent: '混む見込み' })
       : d.level === 'quiet' ? el('span', { className: 'pill plain', textContent: '空きが多い見込み' }) : el('span', { className: 'muted', textContent: '—' }));

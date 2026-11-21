@@ -776,20 +776,23 @@ test('予約数の予測: 同じ曜日の過去8週間の平均で見込み、�
   book(db, { date: '2026-11-17', start: '10:00' }); // 来週の火曜に、すでに1件
   const f = forecast(db, now);
   const tue = f.days.find((d) => d.date === '2026-11-17');
-  assert.equal(tue.expected, 6);
   assert.equal(tue.samples, 7);
+  if (f.method === 'mean') assert.equal(tue.expected, 6);
   assert.equal(tue.confirmed, 1);
   assert.ok(tue.low <= 6 && tue.high >= 6 && tue.low >= 1);
   const wed = f.days.find((d) => d.date === '2026-11-18');
-  assert.equal(wed.expected, 3);
+  if (f.method === 'mean') assert.equal(wed.expected, 3);
   // 4週間先の火曜も、今日より前の実績だけで見込む
-  assert.equal(f.days.find((d) => d.date === '2026-12-08').expected, 6);
+  if (f.method === 'mean') assert.equal(f.days.find((d) => d.date === '2026-12-08').expected, 6);
   // 受付のない日（土日）は出さない
   assert.ok(!f.days.some((d) => [0, 6].includes(core.weekday(d.date))));
-  // 当たり具合: 曜日ごとの予測のほうが、曜日を区別しない予測より誤差が小さい
-  assert.ok(f.accuracy.mae < f.accuracy.baseline);
+  // 当たり具合: 過去4週間の受付日を、1・3・7日前の時点から予測し直して、2つの方法の誤差を出す
+  assert.ok(f.accuracy.trials > 0);
+  assert.ok(f.accuracy.mean >= 0 && f.accuracy.pace >= 0);
+  // 誤差が小さいほうの方法を使う（同じなら、入り方を使う方法）
+  assert.equal(f.method, f.accuracy.pace <= f.accuracy.mean ? 'pace' : 'mean');
   // 見込み稼働率（30分 × 6件 ÷ 受付時間 1080分）と判定
-  assert.equal(Math.round(tue.load * 100), Math.round((6 * 30 / 1080) * 100));
+  assert.equal(Math.round(tue.load * 100), Math.round((tue.expected * 30 / 1080) * 100));
   assert.equal(tue.level, 'quiet');
 });
 
@@ -830,4 +833,37 @@ test('キャンセル待ち: 埋まっている日に登録でき、空きが出
   const c = reg({ email: 'other@example.com' });
   w.dueWaitlist(db, new Date('2026-11-18T00:00:00Z'));
   assert.equal(c.status, 'expired');
+});
+
+test('予約数の予測: 入り方（ペース）を使うと、近い日の見込みが実際に近づく', () => {
+  const { forecast, paceCurve } = require('../lib/forecast');
+  const db = fresh();
+  db.settings.loadCap = 100;
+  const now = new Date('2026-11-16T00:00:00Z'); // 月曜
+  // 過去12週の毎日（平日）、同じ曜日でも件数がばらつく。どの予約も「面談の3日前」に入る
+  let n = 0;
+  for (let w = 1; w <= 12; w++) {
+    for (let d = 0; d < 5; d++) {
+      const date = core.addDays('2026-11-16', -7 * w + d);
+      const count = 2 + ((w * 3 + d * 5) % 7); // 2〜8件
+      for (let i = 0; i < count; i++) {
+        db.bookings.push({ id: 'b' + n, token: 't', serviceId: 'v1', staffId: i % 2 ? 's1' : 's2', date, start: 600 + (i >> 1) * 30, end: 630 + (i >> 1) * 30,
+          customerName: '客' + n, email: `c${n++}@example.com`, status: 'completed', source: 'import', createdAt: core.addDays(date, -3) + 'T01:00:00.000Z' });
+      }
+    }
+  }
+  const pace = paceCurve(db, '2026-11-16', 16);
+  assert.equal(pace.pace[3], 1); // 3日前には全部入っている
+  assert.equal(pace.pace[4], 0); // 4日前にはまだ1件もない
+  // 明後日（11/18）に、すでに9件入っているとする（いつもより多い日）
+  for (let i = 0; i < 9; i++) {
+    db.bookings.push({ id: 'x' + i, token: 't', serviceId: 'v1', staffId: i % 2 ? 's1' : 's2', date: '2026-11-18', start: 600 + (i >> 1) * 30, end: 630 + (i >> 1) * 30,
+      customerName: 'x' + i, email: `x${i}@example.com`, status: 'booked', source: 'web', createdAt: '2026-11-15T01:00:00.000Z' });
+  }
+  const f = forecast(db, now);
+  assert.equal(f.method, 'pace'); // 過去で試して、ペースを使うほうが当たった
+  assert.ok(f.accuracy.pace < f.accuracy.mean);
+  const wed = f.days.find((d) => d.date === '2026-11-18');
+  assert.equal(wed.expected, 9); // 3日前より近い日は、ほぼ出そろっているので、入っている件数をそのまま見込む
+  assert.ok(wed.high - wed.low <= 2); // 幅も狭い
 });
