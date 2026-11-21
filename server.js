@@ -192,6 +192,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
   // 定期的に行うメールの仕事: 失敗したメールの送り直し → 前日リマインド → 送りそこねた分の当日リマインド
   // キャンセル待ち: 空きが出たら、登録の早い順に1人ずつ枠を取り置いて知らせる（予約が空いたとき・1分ごとの確認のときに呼ぶ）
   let checkingWaitlist = false;
+  let rerunWaitlist = false; // 確認の途中に、もう一度確認が必要になった
   const waitMails = []; // 直近1時間に送ったキャンセル待ちのメールの時刻（送りすぎを防ぐ）
   const WAIT_MAILS_PER_HOUR = 60;
   const canSendWaitMail = () => {
@@ -202,7 +203,8 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     return true;
   };
   async function checkWaitlist(now = new Date()) {
-    if (!mail.enabled || checkingWaitlist) return 0;
+    if (!mail.enabled) return 0;
+    if (checkingWaitlist) { rerunWaitlist = true; return 0; }
     checkingWaitlist = true;
     try {
       const d = db();
@@ -224,7 +226,10 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       if (sent) noteCount(d, 'waitlist_offer', 'キャンセル待ちの方へ、空きをご案内しました', '人（枠を30分取り置き中）');
       if (sent || before !== JSON.stringify([d.holds || [], (d.waitlist || []).map((w) => w.status)])) store.save();
       return sent;
-    } finally { checkingWaitlist = false; }
+    } finally {
+      checkingWaitlist = false;
+      if (rerunWaitlist) { rerunWaitlist = false; kickWaitlist(); }
+    }
   }
   // 同じ種類のお知らせは、1時間ごとに1行へまとめて件数だけ増やす（通知の一覧を埋めつくさないため）
   const counters = new Map();
@@ -504,7 +509,7 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
             for (const st of d.staff) {
               const l = core.dayLoad(d, st, day);
               const h = core.dayHours(d, st, day);
-              if (l.capacity || l.booked || h) {
+              if (l.capacity || l.booked || h || core.overrideFor(d, st.id, day)) {
                 out[day][st.id] = { booked: l.booked, capacity: l.capacity, open: h ? h.open : null, close: h ? h.close : null, override: Boolean(core.overrideFor(d, st.id, day)) };
               }
             }

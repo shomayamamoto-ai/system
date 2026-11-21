@@ -225,7 +225,8 @@ function drawWeek() {
       .concat(weekData.bookings.filter((b) => b.date === d && (showCancelled || b.status !== 'cancelled')).map((b) => ({ kind: 'booking', ...b })))
       .concat(weekData.blocks.filter((k) => k.date === d).map((k) => ({ kind: 'block', ...k })))
       .filter(visible);
-    week.push({ d, items, closed: weekData.closedDays.find((c) => c.date === d), active: items.filter((x) => x.kind === 'booking' && x.status !== 'cancelled').length });
+    const special = Object.values((weekData.loads || {})[d] || {}).some((l) => l.open != null);
+    week.push({ d, items, closed: special ? null : weekData.closedDays.find((c) => c.date === d), active: items.filter((x) => x.kind === 'booking' && x.status !== 'cancelled').length });
   }
   // 表示する時間帯: 受付時間と、その週の予約・予定がすべて入る範囲
   const staff = state.config.staff.filter((s) => !state.staffFilter || s.id === state.staffFilter);
@@ -374,7 +375,7 @@ function openBooking(b) {
       const diff = b.actualEnd != null ? (b.actualEnd - b.actualStart) - plan : null;
       $('actSaved').textContent = b.actualStart == null ? '記録を消しました。'
         : diff == null ? '開始を記録しました。' : `記録しました（予定より${diff === 0 ? 'ちょうど' : diff > 0 ? `${diff}分長い` : `${-diff}分短い`}）。`;
-      if (changed) { toast('面談が終わったので「完了」にしました。'); refresh(); }
+      if (changed) { toast('面談が終わったので「完了」にしました。'); refresh(); openBooking(b); }
     } catch (e) { $('actSaved').textContent = e.message; }
   };
   $('actualBox').onsubmit = (ev) => { ev.preventDefault(); saveActual(); };

@@ -949,3 +949,46 @@ test('キャンセルの起きやすさ: 申し込みの時点で分かってい
   assert.deepEqual([f.get(c).visit, f.get(c).history], ['repeat', 'hadBad']);
   assert.equal(f.get(c).lead, '7-13');
 });
+
+test('2回目の点検で見つかった問題の再発防止', () => {
+  // 休憩と毎週の予定が重なっていても、受付できる時間から二重に引かない
+  let db = fresh();
+  db.staff[0].hours[2] = { start: '09:00', end: '18:00', breaks: [{ start: '12:00', end: '13:00' }] };
+  core.addBlock(db, { staffId: 's1', date: '2026-11-17', start: '12:00', end: '13:00', repeat: true }, NOW);
+  core.addBlock(db, { staffId: 's1', date: '2026-11-17', start: '12:30', end: '13:30' }, NOW);
+  assert.equal(core.capacityMinutes(db, db.staff[0], '2026-11-17'), 540 - 90); // 12:00〜13:30 の90分だけ
+  for (const t of ['09:00', '10:00', '11:00', '13:30', '14:30']) book(db, { start: t, email: `k${t.slice(0, 2)}@example.com` }); // 300分
+  assert.ok(core.freeSlots(db, { date: '2026-11-17', serviceId: 'v2', staffId: 's1' }, NOW).length > 0); // 360 ≤ 450×0.8＝360
+
+  // 休業日を後から入れると、その日の「特定の日の受付時間」は外れる。祝日の一括登録は、その日を飛ばす
+  db = fresh();
+  core.setOverride(db, { staffId: 's1', date: '2026-11-25', start: '09:00', end: '12:00' }, NOW);
+  const c = core.addClosedDay(db, { date: '2026-11-25' });
+  assert.equal(c.removedOverrides, 1);
+  assert.deepEqual(core.freeSlots(db, { date: '2026-11-25', serviceId: 'v1', staffId: 'any' }, NOW), []);
+  core.setOverride(db, { staffId: 's1', date: '2027-01-01', start: '10:00', end: '12:00' }, NOW);
+  const r = core.addHolidays(db, 2027, NOW);
+  assert.ok(r.skipped.some((x) => x.date === '2027-01-01' && /特定の日/.test(x.reason)));
+
+  // 短い時間だけ開ける日も、最初の1件は予約できる。予約が入らない長さの日は「受付なし」
+  db = fresh();
+  core.setOverride(db, { staffId: 's1', date: '2026-11-28', start: '10:00', end: '10:30' }, NOW);
+  assert.deepEqual(core.freeSlots(db, { date: '2026-11-28', serviceId: 'v1', staffId: 's1' }, NOW).map((x) => x.start), ['10:00']);
+  assert.equal(core.availability(db, { from: '2026-11-28', to: '2026-11-28', serviceId: 'v2', staffId: 's1' }, NOW)['2026-11-28'], undefined); // 60分は入らない
+
+  // 予測: 記録の始まる前の日を「0件の日」として平均に入れない
+  const { forecast } = require('../lib/forecast');
+  db = fresh();
+  db.settings.loadCap = 100;
+  let n = 0;
+  for (let w = 1; w <= 2; w++) {
+    for (let i = 0; i < 6; i++) {
+      db.bookings.push({ id: 'h' + n, token: 't', serviceId: 'v1', staffId: 's1', date: core.addDays('2026-11-17', -7 * w), start: 540 + i * 30, end: 570 + i * 30,
+        customerName: '客' + n, email: `h${n++}@example.com`, status: 'completed', source: 'import', createdAt: '2026-10-01T00:00:00.000Z', leadUnknown: true });
+    }
+  }
+  db.bookings.push({ id: 'h-old', token: 't', serviceId: 'v1', staffId: 's1', date: '2026-11-03', start: 540, end: 570, customerName: 'x', email: 'x@example.com', status: 'completed', source: 'import', createdAt: '2026-10-01T00:00:00.000Z', leadUnknown: true });
+  const f = forecast(db, NOW);
+  const tue = f.days.find((d) => d.date === '2026-11-17');
+  assert.equal(tue.enough, false); // 記録は2週分だけなので、3週分そろうまでは見込みを出さない（0件の週で薄めない）
+});
