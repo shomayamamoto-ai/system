@@ -11,6 +11,7 @@ const crypto = require('node:crypto');
 const core = require('./lib/core');
 const auth = require('./lib/auth');
 const { analyze, updateRules } = require('./lib/analytics');
+const { forecast } = require('./lib/forecast');
 const { createMailer, buildMail, buildStaffMail, dueReminders, dueCatchUp, stillRelevant } = require('./lib/mailer');
 
 const { AppError } = core;
@@ -502,6 +503,9 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       log('自分のパスワードを変更', '');
       store.save();
       return send(res, 200, { ok: true });
+    }
+    if (m === 'GET' && p === '/api/admin/forecast') {
+      return send(res, 200, forecast(d));
     }
     if (m === 'GET' && p === '/api/admin/analytics') {
       const today = core.nowJST().date;

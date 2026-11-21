@@ -754,3 +754,41 @@ test('実際の面談時間: 延長が多いと準備時間を提案し、詰め
   assert.match(s1.action, /10分にすると/);
   assert.ok(r.suggestions.some((x) => x.title === '予定を詰めた日ほど、開始が遅れています（実績）'));
 });
+
+test('予約数の予測: 同じ曜日の過去8週間の平均で見込み、当たり具合も示す', () => {
+  const { forecast } = require('../lib/forecast');
+  const db = fresh();
+  db.settings.loadCap = 100;
+  const now = new Date('2026-11-16T00:00:00Z'); // 月曜（日本時間 9:00）
+  // 過去8週の火曜は毎回6件、水曜は 2件と4件を交互（平均3件）
+  let csv = '日付,開始,メニュー,担当者,氏名,メール,ステータス\n';
+  for (let w = 1; w <= 8; w++) {
+    const tue = core.addDays('2026-11-17', -7 * w);
+    for (let i = 0; i < 6; i++) csv += `${tue},${String(9 + i).padStart(2, '0')}:00,初回相談（30分）,担当者A,火${w}${i},t${w}${i}@example.com,完了\n`;
+    const wed = core.addDays('2026-11-18', -7 * w);
+    for (let i = 0; i < (w % 2 ? 2 : 4); i++) csv += `${wed},${String(9 + i).padStart(2, '0')}:00,初回相談（30分）,担当者A,水${w}${i},w${w}${i}@example.com,完了\n`;
+  }
+  // 過去のある火曜を休業日にすると、その日は平均から外れる（0件として数えない）
+  csv += '';
+  core.importCsv(db, csv, now);
+  core.addClosedDay(db, { date: '2026-10-27' });
+  db.bookings = db.bookings.filter((b) => b.date !== '2026-10-27');
+  book(db, { date: '2026-11-17', start: '10:00' }); // 来週の火曜に、すでに1件
+  const f = forecast(db, now);
+  const tue = f.days.find((d) => d.date === '2026-11-17');
+  assert.equal(tue.expected, 6);
+  assert.equal(tue.samples, 7);
+  assert.equal(tue.confirmed, 1);
+  assert.ok(tue.low <= 6 && tue.high >= 6 && tue.low >= 1);
+  const wed = f.days.find((d) => d.date === '2026-11-18');
+  assert.equal(wed.expected, 3);
+  // 4週間先の火曜も、今日より前の実績だけで見込む
+  assert.equal(f.days.find((d) => d.date === '2026-12-08').expected, 6);
+  // 受付のない日（土日）は出さない
+  assert.ok(!f.days.some((d) => [0, 6].includes(core.weekday(d.date))));
+  // 当たり具合: 曜日ごとの予測のほうが、曜日を区別しない予測より誤差が小さい
+  assert.ok(f.accuracy.mae < f.accuracy.baseline);
+  // 見込み稼働率（30分 × 6件 ÷ 受付時間 1080分）と判定
+  assert.equal(Math.round(tue.load * 100), Math.round((6 * 30 / 1080) * 100));
+  assert.equal(tue.level, 'quiet');
+});

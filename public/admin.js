@@ -627,7 +627,28 @@ function delta(cur, prev, kind, hasPrev, upIsGood, sure, range) {
   return [el('span', { className: 'delta' + tone, textContent: word }), el('span', { className: 'prev', textContent: `前の期間 ${before}` }), ...extra];
 }
 let rulesInfo = null;
+// これからの予約の見込み（分析の期間とは関係なく、今日から4週間）
+async function loadForecast() {
+  const f = await call('/api/admin/forecast');
+  const busy = f.days.filter((d) => d.level === 'busy');
+  const acc = f.accuracy;
+  $('fcSummary').replaceChildren(el('p', null,
+    busy.length ? el('strong', { textContent: `混む見込みの日が ${busy.length}日あります（見込み稼働率が${f.cap}%を超える日）。` }) : `見込み稼働率が${f.cap}%を超える日はありません。`,
+    acc ? ` 過去${acc.days}日ぶんを同じ方法で予測してみると、1日あたりの誤差は平均 ±${acc.mae.toFixed(1)}件でした（曜日を区別しない予測では ±${acc.baseline.toFixed(1)}件）。` : ' 予測の当たり具合を確かめるには、もう少し過去の実績が必要です。'));
+  const tag = (d) => (!d.enough ? el('span', { className: 'muted', textContent: '実績不足' })
+    : d.level === 'busy' ? el('span', { className: 'pill noshow', textContent: '混む見込み' })
+      : d.level === 'quiet' ? el('span', { className: 'pill plain', textContent: '空きが多い見込み' }) : el('span', { className: 'muted', textContent: '—' }));
+  $('fcTable').replaceChildren(
+    el('tr', null, ...['日付', '確定済み', '見込み（幅）', '見込み稼働率', ''].map((h) => el('th', { textContent: h }))),
+    ...f.days.map((d) => el('tr', { className: d.level === 'busy' ? 'busy' : '' },
+      el('td', { textContent: jp(d.date) + (d.date === f.today ? ' 今日' : '') }),
+      el('td', { textContent: `${d.confirmed}件` }),
+      el('td', { textContent: d.enough ? `${d.expected}件（${d.low}〜${d.high}）` : '—' }),
+      el('td', { textContent: d.enough ? pct(d.load) : '—' }),
+      el('td', null, tag(d)))));
+}
 async function loadAnalytics() {
+  loadForecast().catch((e) => { $('fcSummary').textContent = e.message; });
   const v = $('days').value;
   const a = await call(`/api/admin/analytics?${v.includes('-') ? 'month=' + v : 'days=' + v}`);
   $('printHead').textContent = `${state.config.settings.site.name}　予約レポート（${a.period.from}〜${a.period.to}）`;

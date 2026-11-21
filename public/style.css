@@ -460,3 +460,9 @@ dialog h2 { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .qtable th:first-child, .qtable td:first-child { text-align: left; color: var(--muted); font-weight: 400; white-space: nowrap; }
 .qtable .hot { color: var(--bad); font-weight: 700; }
 .toast.warn { border-left-color: var(--bad); }
+
+/* これからの予約の見込み */
+.fctable { min-width: 520px; font-variant-numeric: tabular-nums; }
+.fctable td, .fctable th { white-space: nowrap; }
+.fctable tr.busy td { background: var(--bad-soft); }
+#fcCard .fctable { display: table; }
