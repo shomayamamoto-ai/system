@@ -437,6 +437,19 @@ function openBooking(b) {
   $('detail').showModal();
 }
 function openBlock(k) {
+  if (k.hold) { // キャンセル待ちの方のための取り置き
+    $('detailTitle').textContent = 'キャンセル待ちの方へ取り置き中';
+    summary([['日時', `${jp(k.date)} ${k.start}〜${k.end}`], ['担当者', staffName(k.staffId)], ['取り置きの期限', when(k.expiresAt)]]);
+    const rel = el('button', { className: 'small danger', textContent: '取り置きを解除して、次の方へ回す' });
+    rel.addEventListener('click', guard(async () => {
+      if (!confirm('この取り置きを解除します。いま案内している方は予約できなくなります。よろしいですか？')) return;
+      $('detail').close();
+      await call(`/api/admin/holds/${k.id}`, 'DELETE');
+      await refresh();
+    }));
+    $('detailActions').replaceChildren(rel);
+    return $('detail').showModal();
+  }
   $('detailTitle').textContent = k.recurring ? '毎週の予定' : '予定の詳細';
   summary([['日時', k.recurring ? `毎週${WD[wd(k.date)]}曜 ${k.start}〜${k.end}` : `${jp(k.date)} ${k.start}〜${k.end}`], ['内容', k.title], ['担当者', staffName(k.staffId)]]);
   const del = el('button', { className: 'small danger', textContent: k.recurring ? 'この毎週の予定を、すべて削除する' : 'この予定を削除する' });
@@ -533,7 +546,7 @@ const query = (form) => new URLSearchParams([...new FormData(form)].filter(([, v
 async function loadWaitlist() {
   const data = await call('/api/admin/waitlist');
   $('waitNote').textContent = data.enabled
-    ? '空きが出ると、登録した人へ自動でメールを送ります（先着順のご案内）。お知らせのあと、予約が自動で確定することはありません。'
+    ? '空きが出ると、登録の早い順に1人ずつ、その枠を30分間取り置いてメールで知らせます。期限までに予約がなければ、次の方へ回します。'
     : 'メール送信が設定されていないため、予約ページではキャンセル待ちを受け付けていません。';
   $('waitRows').replaceChildren(...(data.waitlist.length ? data.waitlist.map((w) => {
     const del = el('button', { className: 'small danger', textContent: '削除' });
@@ -545,7 +558,7 @@ async function loadWaitlist() {
     return el('div', { className: 'rowitem' },
       el('span', { className: 'main', textContent: `${jpFull(w.date)}（${w.part}）　${w.customerName} 様` }),
       el('span', { className: 'sub', textContent: `${w.serviceName}／${w.staffName}／${w.email}／登録 ${when(w.createdAt)}${w.notifiedAt ? `／お知らせ ${when(w.notifiedAt)}` : ''}` }),
-      el('span', { className: 'side row' }, el('span', { className: 'pill' + (w.status === 'notified' ? ' completed' : ''), textContent: w.status === 'notified' ? 'お知らせ済み' : '待っています' }), del));
+      el('span', { className: 'side row' }, el('span', { className: 'pill' + (w.status === 'offered' ? ' completed' : ''), textContent: w.status === 'offered' ? `${w.holdTime}を取り置き中（${when(w.holdUntil)}まで）` : '待っています' }), del));
   }) : [empty('キャンセル待ちの登録はありません。')]));
 }
 async function loadList() {

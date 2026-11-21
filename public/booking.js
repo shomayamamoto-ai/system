@@ -122,14 +122,14 @@ function drawWaitBox(open, full) {
   const submit = el('button', { type: 'submit', className: 'primary', textContent: 'キャンセル待ちに登録する' });
   form.append(
     el('h3', { textContent: `${jp(state.date)}のキャンセル待ち` }),
-    el('p', { className: 'muted', textContent: (full ? 'この日は埋まっています。' : '') + '登録しておくと、空きが出たときにメールでお知らせします。お知らせは先着順のご案内で、予約は自動では確定しません。' }),
+    el('p', { className: 'muted', textContent: (full ? 'この日は埋まっています。' : '') + '登録しておくと、空きが出たときに、登録の早い順にメールでお知らせします。お知らせした方のために、その枠を30分間取り置きます。' }),
     el('label', null, 'ご希望の時間帯', part), el('label', null, 'お名前（必須）', name), el('label', null, 'メールアドレス（必須）', email), submit, msg);
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     submit.disabled = true;
     try {
       const w = await call('/api/public/waitlist', { body: { serviceId: state.serviceId, staffId: state.staffId, date: state.date, part: part.value, customerName: name.value, email: email.value } });
-      box.replaceChildren(el('div', { className: 'msg ok', textContent: `${jp(w.date)}のキャンセル待ちを登録しました。空きが出たら、メールでお知らせします。確認のメールもお送りしました。` }));
+      box.replaceChildren(el('div', { className: 'msg ok', textContent: `${jp(w.date)}のキャンセル待ちを受け付けました。空きが出たら、登録の早い順にメールでお知らせし、30分間その枠を取り置きます。` }));
     } catch (e) { msg.textContent = e.message; submit.disabled = false; }
   });
   box.replaceChildren(form);
@@ -138,8 +138,8 @@ async function showWaitlist(id, token) {
   const w = await call(`/api/public/waitlist?id=${encodeURIComponent(id)}&token=${encodeURIComponent(token)}`);
   $('form').hidden = $('cta').hidden = true;
   $('done').hidden = false;
-  const active = w.status === 'waiting';
-  $('doneTitle').textContent = active ? 'キャンセル待ちの登録' : w.status === 'notified' ? '空きのお知らせは送信済みです' : 'このキャンセル待ちは終了しています';
+  const active = w.status === 'waiting' || w.status === 'offered';
+  $('doneTitle').textContent = { waiting: 'キャンセル待ちの登録', offered: '空きが出て、取り置き中です（メールをご確認ください）', booked: 'キャンセル待ちから予約されました', missed: '取り置きの期限が切れました', cancelled: 'キャンセル待ちを取り消しました', expired: 'このキャンセル待ちは終了しています' }[w.status] || 'このキャンセル待ちは終了しています';
   $('doneIcon').classList.toggle('off', !active);
   $('doneMail').hidden = $('doneLinkBox').hidden = $('doneBlocked').hidden = true;
   $('doneSummary').replaceChildren(...[['日付', `${jp(w.date)}（${w.part}）`], ['ご相談内容', w.serviceName], ['お名前', `${w.customerName} 様`]]
@@ -151,6 +151,20 @@ async function showWaitlist(id, token) {
     if (!confirm('キャンセル待ちの登録を取り消します。よろしいですか？')) return;
     try { await call('/api/public/waitlist/cancel', { body: { id, token } }); await showWaitlist(id, token); showError(''); } catch (e) { showError(e.message); }
   };
+}
+
+// 取り置きの枠で予約する（キャンセル待ちのお知らせメールのリンクから来たとき）
+async function startHold(id, token) {
+  const h = await call(`/api/public/hold?id=${encodeURIComponent(id)}&token=${encodeURIComponent(token)}`);
+  Object.assign(state, { hold: { id, token }, serviceId: h.serviceId, staffId: h.staffId, date: h.date, start: h.start, month: h.date.slice(0, 7) });
+  $('form').hidden = $('cta').hidden = false;
+  $('secService').hidden = $('secStaff').hidden = $('secDate').hidden = true;
+  $('changeNote').hidden = false;
+  const until = new Date(h.expiresAt).toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit' });
+  $('changeNote').textContent = `キャンセル待ちの空きを、${until}まで取り置いています: ${jp(h.date)} ${h.start}〜${h.end}／${h.serviceName}／${h.staffName}。下の欄に入力して、予約を確定してください。`;
+  $('customer').customerName.value = h.customerName;
+  $('customer').email.value = h.email;
+  renderPicked();
 }
 
 let slotRequest = 0;
@@ -278,6 +292,7 @@ $('customer').addEventListener('submit', async (ev) => {
   const answers = {};
   for (const q of state.config.questions) { answers[q.id] = body['q_' + q.id] || ''; delete body['q_' + q.id]; }
   Object.assign(body, { answers, serviceId: state.serviceId, staffId: state.staffId, date: state.date, start: state.start });
+  if (state.hold) Object.assign(body, { holdId: state.hold.id, holdToken: state.hold.token });
   $('submit').disabled = true;
   $('submit').textContent = '送信中…';
   try {
@@ -314,6 +329,7 @@ $('customer').addEventListener('submit', async (ev) => {
         : el('input', { name, required: q.required, maxLength: 500 });
       return el('label', null, `${q.label}（${q.required ? '必須' : '任意'}）`, field);
     }));
+    if (q.get('hold') && q.get('token')) return startHold(q.get('hold'), q.get('token')); // アンケートの欄を作ってから
     state.month = state.config.today.slice(0, 7);
     state.date = state.config.today;
     state.serviceId = state.config.services[0].id;

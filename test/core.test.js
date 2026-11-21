@@ -796,43 +796,77 @@ test('予約数の予測: 同じ曜日の過去8週間の平均で見込み、�
   assert.equal(tue.level, 'quiet');
 });
 
-test('キャンセル待ち: 埋まっている日に登録でき、空きが出たら知らせる対象になる', () => {
+test('キャンセル待ち（取り置き式）: 早い順に1人ずつ枠を取り置き、期限が切れたら次の人へ回す', () => {
   const w = require('../lib/waitlist');
   const db = fresh();
   db.settings.loadCap = 100;
+  const at = (iso) => new Date(iso);
   // 11/17（火）の担当者A・午前を埋める（9:00〜12:00 の60分×3件）
   for (const t of ['09:00', '10:00', '11:00']) book(db, { start: t, email: `x${t.slice(0, 2)}@example.com` });
-  const reg = (over) => w.addWaitlist(db, Object.assign({ serviceId: 'v2', staffId: 's1', date: '2026-11-17', part: 'am', customerName: '待つ人', email: 'Wait@Example.com' }, over), NOW);
-  // 午後は空いているので、終日・午後の登録は「そのまま予約を」と断る
-  assert.throws(() => reg({ part: 'any' }), /いま空いている時間があります/);
+  const reg = (over, now = NOW) => w.addWaitlist(db, Object.assign({ serviceId: 'v2', staffId: 's1', date: '2026-11-17', part: 'am', customerName: '待つ人', email: 'wait@example.com' }, over), now);
   assert.throws(() => reg({ part: 'pm' }), /いま空いている時間があります/);
-  const a = reg();
-  assert.equal(a.email, 'wait@example.com');
-  assert.throws(() => reg(), /すでにキャンセル待ち/);
-  assert.throws(() => reg({ date: '2026-10-01' }), /受け付けている期間/);
-  assert.throws(() => reg({ customerName: 'http://spam' }), /URL/);
-  assert.throws(() => reg({ date: '2026-11-21' }), /受付をしていません/); // 土曜（担当者Aは休み）
-  assert.equal(core.availability(db, { from: '2026-11-21', to: '2026-11-21', serviceId: 'v2', staffId: 's1' }, NOW)['2026-11-21'], undefined);
-  assert.deepEqual(w.dueWaitlist(db, NOW), []);
-  // 10:00 の予約がキャンセルされると、知らせる対象になる
+  assert.throws(() => reg({ date: '2026-11-21' }), /受付をしていません/); // 土曜
+  assert.throws(() => reg({ customerName: '至急 evil-example.jp/verify にて確認' }), /ドメイン名/);
+  assert.throws(() => reg({ customerName: 'ｈｔｔｐｓ：／／evil' }), /URL/); // 全角でも見逃さない
+  const first = reg({}, at('2026-11-16T00:00:00Z')).entry;
+  const second = reg({ email: 'second@example.com' }, at('2026-11-16T00:01:00Z')).entry;
+  assert.equal(db.waitlist.length, 2);
+  assert.deepEqual(w.makeOffers(db, NOW), []); // まだ空きはない
+
+  // 10:00 の予約がキャンセルされると、早く登録した1人目にだけ取り置く
   core.setBookingStatus(db, db.bookings[1].id, 'cancelled', NOW);
-  const due = w.dueWaitlist(db, NOW);
-  assert.equal(due.length, 1);
-  assert.deepEqual(due[0].slots, ['10:00']);
-  const m = w.buildWaitlistMail('open', db, a, due[0].slots, 'https://yoyaku.example.com');
-  assert.match(m.subject, /空きが出ました/);
-  assert.ok(m.text.includes('https://yoyaku.example.com/?date=2026-11-17&service=v2'));
-  assert.ok(m.text.includes('先着順'));
-  // 取り消し（合言葉が違えば断る）。日付が過ぎた登録は「期限切れ」になる
-  assert.throws(() => w.cancelWaitlist(db, a.id, 'x'), /見つかりません/);
-  w.cancelWaitlist(db, a.id, a.token);
-  assert.equal(a.status, 'cancelled');
-  assert.deepEqual(w.dueWaitlist(db, NOW), []);
-  // 期限切れ
-  db.bookings[1].status = 'booked'; // 10:00 をまた埋める
-  const c = reg({ email: 'other@example.com' });
-  w.dueWaitlist(db, new Date('2026-11-18T00:00:00Z'));
-  assert.equal(c.status, 'expired');
+  const offers = w.makeOffers(db, NOW);
+  assert.equal(offers.length, 1);
+  assert.equal(offers[0].w, first);
+  assert.equal(first.status, 'offered');
+  const hold = offers[0].hold;
+  assert.deepEqual([hold.start, hold.end, hold.staffId], [600, 660, 's1']);
+  assert.equal(hold.expiresAt - NOW.getTime(), 30 * 60000);
+  // 取り置き中の枠は、ほかの人の予約ページにも、2人目にも出さない
+  assert.ok(!core.freeSlots(db, { date: '2026-11-17', serviceId: 'v2', staffId: 's1' }, NOW).some((x) => x.start === '10:00'));
+  assert.deepEqual(w.makeOffers(db, NOW), []);
+  assert.equal(second.status, 'waiting');
+  const m = w.buildWaitlistMail('offer', db, first, hold, 'https://yoyaku.example.com');
+  assert.match(m.subject, /取り置き中/);
+  assert.ok(m.text.includes(`/?hold=${hold.id}&token=${hold.token}`));
+  assert.ok(m.text.includes('10:00〜11:00'));
+
+  // 期限（30分）が切れると、1人目は「見送り」になり、同じ枠を2人目に取り置く
+  const later = at('2026-11-16T00:31:00Z');
+  const next = w.makeOffers(db, later);
+  assert.equal(first.status, 'missed');
+  assert.equal(next.length, 1);
+  assert.equal(next[0].w, second);
+  assert.throws(() => w.holdByToken(db, hold.id, hold.token, later), /見つかりません/);
+  // 2人目が取り消すと、取り置きは外れ、枠はまた予約ページに出る
+  w.cancelWaitlist(db, second.id, second.token);
+  assert.equal(second.status, 'cancelled');
+  assert.ok(core.freeSlots(db, { date: '2026-11-17', serviceId: 'v2', staffId: 's1' }, later).some((x) => x.start === '10:00'));
+});
+
+test('キャンセル待ち: 悪用への備え（登録の上限・同じ返事・今日の午前は午後に登録できない）', () => {
+  const w = require('../lib/waitlist');
+  const db = fresh();
+  db.settings.loadCap = 100;
+  for (const t of ['09:00', '10:00', '11:00']) book(db, { start: t, email: `x${t.slice(0, 2)}@example.com` });
+  const reg = (over) => w.addWaitlist(db, Object.assign({ serviceId: 'v2', staffId: 's1', date: '2026-11-17', part: 'am', customerName: '待つ人', email: 'v@example.com' }, over), NOW);
+  // 同じ条件の重複は、登録しないが同じ返事
+  assert.equal(reg().created, true);
+  assert.equal(reg().created, false);
+  // 取り消しても、24時間で3件までの数は戻らない（+以降の別名も同じ人として数える）
+  const e = db.waitlist[0];
+  w.cancelWaitlist(db, e.id, e.token);
+  assert.equal(reg({ email: 'v+1@example.com' }).created, true);
+  assert.equal(reg({ email: 'v+2@example.com' }).created, true);
+  assert.equal(reg({ email: 'v+3@example.com' }).created, false);
+  assert.equal(db.waitlist.length, 3);
+  // 今日の午前を、午後になってから登録することはできない
+  const afternoon = new Date('2026-11-17T04:00:00Z'); // 日本時間 火曜13時
+  assert.throws(() => w.addWaitlist(db, { serviceId: 'v2', staffId: 's1', date: '2026-11-17', part: 'am', customerName: '遅い人', email: 'late@example.com' }, afternoon), /受付をしていません/);
+  // 終わった登録は30日たつと消える
+  db.waitlist[0].createdAt = '2026-10-01T00:00:00.000Z';
+  w.sweep(db, NOW);
+  assert.equal(db.waitlist.length, 2);
 });
 
 test('予約数の予測: 入り方（ペース）を使うと、近い日の見込みが実際に近づく', () => {

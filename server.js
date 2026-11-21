@@ -57,6 +57,11 @@ function failLimiter(max, windowMs) {
 
 function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, mailer } = {}) {
   const store = new core.Store(dataFile);
+  // 保存のたびに版を1つ進める（空き状況の使い回しを、データが変わったら捨てるため）
+  let version = 0;
+  const rawSave = store.save.bind(store);
+  store.save = () => { version++; rawSave(); };
+  const availCache = new Map();
   const db = () => store.db;
   const mail = mailer || createMailer();
   const sessions = new Map(); // ログイン中の合言葉 → { user, exp }
@@ -90,7 +95,17 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
   const OPEN_USER = { id: 'open', name: '（ログインなし）', role: 'owner' };
 
   // X-Forwarded-For の左側は利用者が自由に書けるので使わない。手前のプロキシが足した「いちばん右」を接続元とみなす
-  const ipOf = (req) => (trustProxy && String(req.headers['x-forwarded-for'] || '').split(',').pop().trim()) || req.socket.remoteAddress || '';
+  const rawIp = (req) => (trustProxy && String(req.headers['x-forwarded-for'] || '').split(',').pop().trim()) || req.socket.remoteAddress || '';
+  // IPv6 は1人で大量の番号を持てるので、上位64ビット（/64）ごとにまとめて数える
+  const ipOf = (req) => {
+    const ip = rawIp(req).replace(/^::ffff:/, '');
+    if (!ip.includes(':')) return ip;
+    const [head, tail = ''] = ip.split('::');
+    const a = head ? head.split(':') : [];
+    const b = tail ? tail.split(':') : [];
+    const full = a.concat(Array(Math.max(0, 8 - a.length - b.length)).fill('0'), b);
+    return full.slice(0, 4).join(':') + '::/64';
+  };
   const httpsSite = Boolean(trustProxy) || /^https:/i.test(publicUrl || ''); // プロキシの後ろ、または公開URLが https なら HTTPS 運用とみなす
   const isHttps = () => httpsSite;
   const send = (res, status, body, headers) => {
@@ -175,25 +190,54 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     mail.send(buildStaffMail(kind, db(), b, publicUrl)).catch((err) => console.error('担当者あてメールの送信に失敗:', err.message));
   };
   // 定期的に行うメールの仕事: 失敗したメールの送り直し → 前日リマインド → 送りそこねた分の当日リマインド
-  // キャンセル待ち: 空きが出た登録者へ知らせる（予約が空いたときと、定期の確認のときに呼ぶ）
+  // キャンセル待ち: 空きが出たら、登録の早い順に1人ずつ枠を取り置いて知らせる（予約が空いたとき・1分ごとの確認のときに呼ぶ）
   let checkingWaitlist = false;
+  const waitMails = []; // 直近1時間に送ったキャンセル待ちのメールの時刻（送りすぎを防ぐ）
+  const WAIT_MAILS_PER_HOUR = 60;
+  const canSendWaitMail = () => {
+    const hour = Date.now() - 3600 * 1000;
+    while (waitMails.length && waitMails[0] < hour) waitMails.shift();
+    if (waitMails.length >= WAIT_MAILS_PER_HOUR) return false;
+    waitMails.push(Date.now());
+    return true;
+  };
   async function checkWaitlist(now = new Date()) {
     if (!mail.enabled || checkingWaitlist) return 0;
     checkingWaitlist = true;
     try {
       const d = db();
       let sent = 0;
-      for (const { w, slots } of wl.dueWaitlist(d, now)) {
+      const before = JSON.stringify([d.holds || [], (d.waitlist || []).map((w) => w.status)]);
+      for (const { w, hold } of wl.makeOffers(d, now)) {
         try {
-          await mail.send(wl.buildWaitlistMail('open', d, w, slots, publicUrl));
-          Object.assign(w, { status: 'notified', notifiedAt: now.toISOString() });
+          if (!canSendWaitMail()) throw new Error('キャンセル待ちのメールが1時間の上限に達しました');
+          await mail.send(wl.buildWaitlistMail('offer', d, w, hold, publicUrl));
           sent++;
-        } catch (err) { console.error('キャンセル待ちのお知らせの送信に失敗:', err.message); }
+        } catch (err) {
+          // 送れなかったときは取り置きを外し、次の確認でもう一度ご案内する
+          console.error('キャンセル待ちのお知らせの送信に失敗:', err.message);
+          wl.releaseHold(d, w);
+          w.status = 'waiting';
+          delete w.offeredAt;
+        }
       }
-      if (sent) core.notify(d, 'waitlist', 'キャンセル待ちの方へ、空きをお知らせしました', `${sent}人へメールを送りました（先着順のご案内です）。`);
-      store.save();
+      if (sent) noteCount(d, 'waitlist_offer', 'キャンセル待ちの方へ、空きをご案内しました', '人（枠を30分取り置き中）');
+      if (sent || before !== JSON.stringify([d.holds || [], (d.waitlist || []).map((w) => w.status)])) store.save();
       return sent;
     } finally { checkingWaitlist = false; }
+  }
+  // 同じ種類のお知らせは、1時間ごとに1行へまとめて件数だけ増やす（通知の一覧を埋めつくさないため）
+  const counters = new Map();
+  function noteCount(d, type, title, unit) {
+    const c = counters.get(type);
+    if (c && Date.now() - c.at < 3600 * 1000 && d.notifications.includes(c.row)) {
+      c.n++;
+      c.row.body = `直近1時間で ${c.n}${unit}`;
+      c.row.read = false;
+      return;
+    }
+    const row = core.notify(d, type, title, `直近1時間で 1${unit}`);
+    counters.set(type, { at: Date.now(), n: 1, row });
   }
   const kickWaitlist = () => { setImmediate(() => checkWaitlist().catch((e) => console.error(e))); };
 
@@ -285,7 +329,17 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       });
     }
     if (m === 'GET' && p === '/api/public/availability') {
-      return send(res, 200, { days: core.availability(d, { from: q.get('from'), to: q.get('to'), serviceId: q.get('serviceId'), staffId: q.get('staffId'), exceptBookingId: ownBooking() }) });
+      // 計算が重めなので、データが変わっていなければ5秒間は同じ結果を使い回す（日時変更中の問い合わせは使い回さない）
+      const own = ownBooking();
+      const key = [q.get('from'), q.get('to'), q.get('serviceId'), q.get('staffId')].join('|');
+      const hit = !own && availCache.get(key);
+      if (hit && hit.version === version && Date.now() - hit.at < 5000) return send(res, 200, { days: hit.days });
+      const days = core.availability(d, { from: q.get('from'), to: q.get('to'), serviceId: q.get('serviceId'), staffId: q.get('staffId'), exceptBookingId: own });
+      if (!own) {
+        if (availCache.size > 500) availCache.clear();
+        availCache.set(key, { at: Date.now(), version, days });
+      }
+      return send(res, 200, { days });
     }
     if (m === 'GET' && p === '/api/public/slots') {
       const slots = core.freeSlots(d, { date: q.get('date'), serviceId: q.get('serviceId'), staffId: q.get('staffId'), exceptBookingId: ownBooking() });
@@ -293,7 +347,20 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     }
     if (m === 'POST' && p === '/api/public/bookings') {
       busy();
-      const b = core.createBooking(d, await readBody(req));
+      const body = await readBody(req);
+      let b;
+      if (body.holdId) {
+        // 取り置きの枠で予約する: 取り置きを外してから、その枠で予約を作る（失敗したら取り置きを戻す）
+        const h = wl.holdByToken(d, body.holdId, body.holdToken);
+        d.holds = d.holds.filter((x) => x !== h);
+        try {
+          b = core.createBooking(d, Object.assign({}, body, { serviceId: h.serviceId, staffId: h.staffId, date: h.date, start: core.toHM(h.start) }));
+        } catch (err) { d.holds.push(h); throw err; }
+        const w = (d.waitlist || []).find((x) => x.id === h.waitlistId);
+        if (w) { w.status = 'booked'; delete w.holdId; }
+      } else {
+        b = core.createBooking(d, body);
+      }
       store.save();
       mailLater('confirm', b);
       tellStaff('confirm', b);
@@ -329,17 +396,17 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     if (m === 'POST' && p === '/api/public/waitlist') {
       busy();
       if (!mail.enabled) throw new AppError('キャンセル待ちは、いまは受け付けていません。', 409);
-      const w = wl.addWaitlist(d, await readBody(req));
-      core.notify(d, 'waitlist', 'キャンセル待ちの登録がありました', `${w.date}（${wl.PARTS[w.part]}）／${(core.findService(d, w.serviceId) || {}).name || ''}／${w.customerName} 様`);
-      store.save();
-      mail.send(wl.buildWaitlistMail('accepted', d, w, [], publicUrl)).catch((err) => console.error('キャンセル待ちの受付メールの送信に失敗:', err.message));
-      return send(res, 201, { id: w.id, token: w.token, date: w.date, part: w.part, status: w.status });
+      const { entry: w, created } = wl.addWaitlist(d, await readBody(req));
+      // 重複・上限のときは登録もメールもしないが、返事は同じにする（登録の有無を外から調べられないように）
+      if (created) {
+        noteCount(d, 'waitlist', 'キャンセル待ちの登録がありました', '件');
+        store.save();
+        if (canSendWaitMail()) mail.send(wl.buildWaitlistMail('accepted', d, w, null, publicUrl)).catch((err) => console.error('キャンセル待ちの受付メールの送信に失敗:', err.message));
+      }
+      return send(res, 201, { date: w.date, part: w.part, status: 'waiting' });
     }
     if (m === 'GET' && p === '/api/public/waitlist') {
-      const w = (d.waitlist || []).find((x) => x.id === q.get('id'));
-      const token = String(q.get('token') || '');
-      const digest = (v) => crypto.createHash('sha256').update(String(v)).digest();
-      if (!w || !crypto.timingSafeEqual(digest(token), digest(w.token))) throw new AppError('キャンセル待ちの登録が見つかりません。', 404);
+      const w = wl.findByToken(d, q.get('id'), q.get('token'));
       return send(res, 200, { id: w.id, date: w.date, part: wl.PARTS[w.part], status: w.status, customerName: w.customerName,
         serviceName: (core.findService(d, w.serviceId) || {}).name || '' });
     }
@@ -348,7 +415,15 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
       const body = await readBody(req);
       const w = wl.cancelWaitlist(d, body.id, body.token);
       store.save();
+      kickWaitlist(); // 取り置き中だった枠を、次の人へ回す
       return send(res, 200, { id: w.id, status: w.status });
+    }
+    if (m === 'GET' && p === '/api/public/hold') {
+      const h = wl.holdByToken(d, q.get('id'), q.get('token'));
+      const w = (d.waitlist || []).find((x) => x.id === h.waitlistId) || {};
+      return send(res, 200, { id: h.id, date: h.date, start: core.toHM(h.start), end: core.toHM(h.end), serviceId: h.serviceId, staffId: h.staffId,
+        serviceName: (core.findService(d, h.serviceId) || {}).name || '', staffName: (core.findStaff(d, h.staffId) || {}).name || '',
+        expiresAt: new Date(h.expiresAt).toISOString(), customerName: w.customerName || '', email: w.email || '' });
     }
 
     // ----- 管理者向け -----
@@ -418,7 +493,8 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
             return Object.assign(adminBooking(b), x ? { risk: { p: x.p, level: x.level, reasons: x.reasons } } : {});
           });
         })(),
-        blocks: d.blocks.filter((k) => k.date >= from && k.date <= to).concat(core.expandRecurring(d, from, to)).map(hm),
+        blocks: d.blocks.filter((k) => k.date >= from && k.date <= to).concat(core.expandRecurring(d, from, to))
+          .concat((d.holds || []).filter((h) => h.date >= from && h.date <= to).map((h) => ({ id: h.id, hold: true, staffId: h.staffId, date: h.date, start: h.start, end: h.end, title: 'キャンセル待ちの方へ取り置き中', expiresAt: new Date(h.expiresAt).toISOString() }))).map(hm),
         closedDays: d.closedDays.filter((c) => c.date >= from && c.date <= to),
         // 日ごと・担当者ごとの稼働率（カレンダーで「8割」を超えた日を目立たせるため）
         loads: (() => {
@@ -497,20 +573,35 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
     }
     if (m === 'GET' && p === '/api/admin/waitlist') {
       const today = core.nowJST().date;
-      const list = (d.waitlist || []).filter((w) => w.date >= today && ['waiting', 'notified'].includes(w.status))
+      const holdOf = (w) => (d.holds || []).find((h) => h.id === w.holdId);
+      const list = (d.waitlist || []).filter((w) => w.date >= today && ['waiting', 'offered'].includes(w.status))
         .sort((x, y) => (x.date === y.date ? (x.createdAt < y.createdAt ? -1 : 1) : x.date < y.date ? -1 : 1))
         .map((w) => ({ id: w.id, date: w.date, part: wl.PARTS[w.part], status: w.status, customerName: w.customerName, email: w.email,
           serviceName: (core.findService(d, w.serviceId) || {}).name || '', staffName: w.staffId === 'any' ? '指名なし' : (core.findStaff(d, w.staffId) || {}).name || '',
-          createdAt: w.createdAt, notifiedAt: w.notifiedAt }));
+          createdAt: w.createdAt, offeredAt: w.offeredAt, holdUntil: holdOf(w) ? new Date(holdOf(w).expiresAt).toISOString() : null,
+          holdTime: holdOf(w) ? `${core.toHM(holdOf(w).start)}〜${core.toHM(holdOf(w).end)}` : null }));
       return send(res, 200, { waitlist: list, enabled: mail.enabled });
     }
     match = /^\/api\/admin\/waitlist\/([\w-]+)$/.exec(p);
     if (m === 'DELETE' && match) {
       const w = (d.waitlist || []).find((x) => x.id === match[1]);
       if (!w) throw new AppError('キャンセル待ちの登録が見つかりません。', 404);
+      wl.releaseHold(d, w);
       w.status = 'cancelled';
+      kickWaitlist(); // 取り置き中だった枠を、次の人へ回す
       log('キャンセル待ちを削除', `${w.date}／${w.customerName} 様`);
       store.save();
+      return send(res, 200, { ok: true });
+    }
+    match = /^\/api\/admin\/holds\/([\w-]+)$/.exec(p);
+    if (m === 'DELETE' && match) { // 取り置きを解除して、次の方へ回す
+      const w = (d.waitlist || []).find((x) => x.holdId === match[1]);
+      if (!w) throw new AppError('取り置きが見つかりません。', 404);
+      wl.releaseHold(d, w);
+      w.status = 'missed';
+      log('取り置きを解除', `${w.date}／${w.customerName} 様`);
+      store.save();
+      kickWaitlist();
       return send(res, 200, { ok: true });
     }
     if (m === 'GET' && p === '/api/admin/customers') {
@@ -753,8 +844,12 @@ function createServer({ dataFile, adminPassword, trustProxy, limits, publicUrl, 
   if (mail.enabled) {
     const timer = setInterval(() => runReminders().catch((e) => console.error(e)), 10 * 60 * 1000);
     timer.unref();
-    server.on('close', () => clearInterval(timer));
+    // 取り置きの期限切れと、次の人へのご案内は1分ごとに確認する
+    const holdTimer = setInterval(() => checkWaitlist().catch((e) => console.error(e)), 60 * 1000);
+    holdTimer.unref();
+    server.on('close', () => { clearInterval(timer); clearInterval(holdTimer); });
   }
+  server.checkWaitlist = checkWaitlist;
   server.runReminders = runReminders;
   server.mailEnabled = mail.enabled;
   return server;
